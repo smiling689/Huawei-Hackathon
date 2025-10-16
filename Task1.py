@@ -3,7 +3,11 @@ from itertools import combinations
 from typing import List, Tuple
 
 from sympy import mod_inverse, nextprime
-from Crypto.Util import number
+
+try:
+    from Crypto.Util import number  # type: ignore
+except ImportError:
+    number = None  # 在无 PyCryptodome 环境下回退到本地生成
 
 class BasicSS:
     def __init__(self, prime_bits: int = 256):
@@ -17,7 +21,14 @@ class BasicSS:
         if prime_bits < 32:
             raise ValueError("安全起见，prime_bits 必须至少为 32 位")
         self.prime_bits = prime_bits
-        self.prime = number.getPrime(self.prime_bits)
+        if number is not None:
+            self.prime = number.getPrime(self.prime_bits)
+        else:
+            # Fallback: 使用随机奇数 + nextprime 生成大素数
+            candidate = secrets.randbits(self.prime_bits - 1)
+            candidate |= 1 << (self.prime_bits - 1)
+            candidate |= 1
+            self.prime = nextprime(candidate)
         # block_size 是秘密的最大字节长度，预留2字节用于长度前缀
         # 例如，256位素数允许的最大秘密长度为 (256-16)/8 = 30 字节
         # 这样可以确保编码后的秘密不会超过有限域的范围
