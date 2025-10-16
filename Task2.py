@@ -26,9 +26,8 @@ class FeldmanVSS(BasicSS):
 
         self.p, self.q, self.g = self._generate_safe_prime_parameters(bits)
 
-        # 让父类负责 block_size 等通用逻辑，再覆盖 prime -> q。
-        super().__init__(prime_bits=self.q.bit_length())
-        self.prime = self.q  # BasicSS 中的有限域素数改为 q
+        # 以 q 作为有限域素数，复用 BasicSS 的运算能力。
+        super().__init__(prime=self.q)
 
     @staticmethod
     def _generate_safe_prime_parameters(bits: int) -> Tuple[int, int, int]:
@@ -40,12 +39,10 @@ class FeldmanVSS(BasicSS):
         while True:
             p = 2 * candidate_q + 1
             if isprime(p):
-                # 在二次剩余子群中挑选生成元（阶为 q）。
-                while True:
-                    h = secrets.randbelow(p - 3) + 2  # 避免 0、1、p-1
-                    # pow(h, 2, p) 的意思是 h^2 mod p
+                for _ in range(10):
+                    h = secrets.randbelow(p - 3) + 2  # 避免平凡元素
                     g = pow(h, 2, p)
-                    if g != 1:
+                    if g != 1 and pow(g, candidate_q, p) == 1:
                         return p, candidate_q, g
             # candidate_q = nextprime(candidate_q + 2)
             candidate_q = number.getPrime(bits - 2)
