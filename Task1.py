@@ -3,44 +3,37 @@ from itertools import combinations
 from typing import List, Tuple
 
 from sympy import mod_inverse, nextprime
-
+from Crypto.Util import number
 
 class BasicSS:
     def __init__(self, prime_bits: int = 256):
         """
-        初始化安全秘密分享实例。
+        初始化安全秘密分享实例
 
         参数:
-        prime_bits: 有限域素数的位数，默认256位
-                    决定了可以处理的秘密大小和安全性。
-
-        属性:
-        - prime: 有限域素数
-        - block_size: 最大支持的秘密大小 = (prime_bits - 16) // 8
+            prime_bits: 有限域素数的位数，默认256位
+                        决定了可以处理的秘密大小和安全性
         """
-        if prime_bits <= 16:
-            raise ValueError("prime_bits 必须大于 16 才能支持长度前缀编码")
-
+        if prime_bits < 32:
+            raise ValueError("安全起见，prime_bits 必须至少为 32 位")
         self.prime_bits = prime_bits
-        self.block_size = (prime_bits - 16) // 8
-        if self.block_size <= 0:
-            raise ValueError("prime_bits 太小，无法编码秘密")
+        self.prime = number.getPrime(self.prime_bits)
+        # block_size 是秘密的最大字节长度，预留2字节用于长度前缀
+        # 例如，256位素数允许的最大秘密长度为 (256-16)/8 = 30 字节
+        # 这样可以确保编码后的秘密不会超过有限域的范围
+        self.block_size = (self.prime_bits - 16) // 8
 
-        # 在指定位数范围内构造一个随机奇数，随后寻找下一个素数，保证 prime 足够大。
-        high_bit = 1 << (prime_bits - 1)
-        random_part = secrets.randbits(prime_bits - 1)
-        candidate = (random_part | high_bit) | 1
-        self.prime = nextprime(candidate)
 
     def _encode_secret(self, secret: bytes) -> int:
         # 将秘密字节串转换为整数，并附加2字节长度前缀用于精确恢复。
         if len(secret) > self.block_size:
-            raise ValueError(f"秘密长度不能超过 {self.block_size} 字节")
+            raise ValueError(f"secret is too long, longer than {self.block_size} bytes")
 
         secret_int = int.from_bytes(secret, "big") if secret else 0
+        # 多留16位用于存储长度信息
         encoded = (secret_int << 16) | len(secret)
         if encoded >= self.prime:
-            raise ValueError("编码后的秘密超过了有限域取值范围")
+            raise ValueError("secret is too large to encode in the chosen prime field")
         return encoded
 
     def _decode_secret(self, value: int) -> bytes:
@@ -97,7 +90,9 @@ class BasicSS:
         # 构造随机多项式：常数项为秘密，其余系数均随机生成。
         encoded_secret = self._encode_secret(secret)
         coeffs = [encoded_secret]
+        # 生成 t-1 个随机系数
         for _ in range(t - 1):
+            # randbelow 生成 [0, prime) 范围内的随机整数
             coeffs.append(secrets.randbelow(self.prime))
 
         shares = []
@@ -170,3 +165,58 @@ if __name__ == "__main__":
     shares2 = ss2.split_secret(secret2, n=5, t=3)
     recovered_insufficient = ss2.recover_secret(shares2[:2])
     print("Test 1.2 recovered with insufficient shares:", recovered_insufficient)
+
+    # 1. 初始化实例
+    # 使用较小的 prime_bits 以便快速演示
+    sss = BasicSS(prime_bits=256)
+    print(f"使用素数位数: {sss.prime_bits}, 最大秘密长度: {sss.block_size} 字节")
+
+    # 2. 定义秘密和分享参数
+    original_secret = b'hello world!'
+    n = 5  # 总共生成 5 份
+    t = 3  # 至少需要 3 份才能恢复
+
+    print(f"\n原始秘密: {original_secret}")
+    print(f"总份额数 (n): {n}, 恢复阈值 (t): {t}")
+
+    # 3. 分割秘密
+    all_shares = sss.split_secret(original_secret, n, t)
+    print("\n生成的全部 5 个份额:")
+    for share in all_shares:
+        print(f"  份额 {share[0]}: {share[1]}")
+
+    # 4. 使用足够的份额恢复秘密
+    # 从全部份额中任选 t=3 份
+    shares_for_recovery = [all_shares[0], all_shares[2], all_shares[4]]
+    print(f"\n使用份额 {[s[0] for s in shares_for_recovery]} 进行恢复...")
+
+    recovered_secret = sss.recover_secret(shares_for_recovery)
+    print(f"恢复的秘密: {recovered_secret}")
+
+    # 验证恢复是否成功
+    assert original_secret == recovered_secret
+    print("✅ 恢复成功！")
+
+    # 5. 尝试用不足的份额恢复
+    not_enough_shares = [all_shares[1], all_shares[3]]
+    print(f"\n尝试使用 {len(not_enough_shares)} (少于{t}) 个份额进行恢复...")
+    try:
+        failed_recovery = sss.recover_secret(not_enough_shares)
+        # 如果恢复出的结果和原始秘密碰巧一样（概率极小），也视为失败
+        if failed_recovery == original_secret:
+            print("❌ 恢复失败：恢复结果不应与原始秘密相同！")
+        else:
+            print(f"恢复出错误的数据: {failed_recovery}")
+
+    except Exception as e:
+        print(f"❌ 正确地抛出错误或恢复出错误数据: 恢复出的秘密与原始秘密不同。")
+
+    # 6. 验证份额一致性
+    print("\n验证份额一致性:")
+    is_consistent = sss.verify_shares_consistency(all_shares, t)
+    print(f"全部 5 个份额是否一致? {is_consistent}")
+
+    # 创建一个不一致的份额列表 (将最后一个份额替换成别的)
+    inconsistent_shares = all_shares[:-1] + [(99, 123456)]
+    is_consistent = sss.verify_shares_consistency(inconsistent_shares, t)
+    print(f"包含伪造份额的列表是否一致? {is_consistent}")
