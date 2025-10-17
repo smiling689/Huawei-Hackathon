@@ -87,7 +87,134 @@ class BasicShamir:
         # 例如，256位素数允许的最大秘密长度为 (256-16)/8 = 30 字节
         # 这样可以确保编码后的秘密不会超过有限域的范围
         self.block_size = (self.prime_bits - 16) // 8
-    
+        # 为批量块编码准备：每个份额值占用的固定字节数（便于拼接/切分）。
+        self.value_bytes = (self.prime_bits + 7) // 8
+
+    # ---------------------- 大密钥（最高 32KB）支持 ----------------------
+    def split_secret_large(self, secret: bytes, n: int, t: int) -> list[tuple[int, bytes]]:
+        """
+        将 *大密钥*（长度可达 32KB）拆分为份额。
+
+        设计要点（性能&兼容性）：
+        - 不改变基础 API 的行为；当需要处理超出 block_size 的密钥时，
+          使用本方法以 *流式分块* 方式处理。
+        - 将密钥按 ``self.block_size`` 分块；每个分块独立生成一套多项式系数，
+          以密块作为常数项。这样能在保证安全性的同时让每份份额只需追加一个
+          固定长度（``value_bytes``）的片段。
+        - 每位参与者的份额用 ``bytes`` 打包：按顺序拼接所有块的 y 值，
+          每个 y 值占 ``value_bytes`` 字节（big-endian）。
+
+        返回值：列表 ``[(share_id, packed_bytes), ...]``，其中 ``packed_bytes``
+        为该参与者在所有块上的 y 值串联。
+
+        注：若密钥本身未超过 ``block_size``，仍建议使用原始 ``split_secret``；
+            本方法专为 32KB 等大密钥场景优化的实现。
+        """
+        if not (2 <= t <= n <= 255):
+            raise ValueError("Invalid parameters, 需要满足 2 ≤ t ≤ n ≤ 255")
+
+        if len(secret) == 0:
+            # 空密钥的边界情况：仍返回 n 份空 payload。
+            return [(i, b"") for i in range(1, n + 1)]
+
+        # 最多 32KB（bonus 要求）
+        if len(secret) > 32768:
+            raise ValueError("Secret too large, 超出 32KB 上限（bonus 目标）")
+
+        # 初始化每个参与者的缓冲区。
+        buffers = [bytearray() for _ in range(n)]
+
+        # 使用内存视图逐块处理，避免不必要的拷贝。
+        mv = memoryview(secret)
+        block_size = self.block_size
+        val_len = self.value_bytes
+
+        offset = 0
+        while offset < len(secret):
+            # 极小概率：编码整数可能 >= prime；则对当前块做“动态缩减 1 字节重试”
+            size = min(block_size, len(secret) - offset)
+            while True:
+                block = bytes(mv[offset: offset + size])
+                try:
+                    encoded = self._encode_secret(block)
+                    break
+                except ValueError as e:
+                    if "too large to encode" in str(e) and size > 0:
+                        size -= 1
+                        continue
+                    raise
+
+            # 生成 t-1 个随机系数（常数项为 encoded）
+            coeffs = [encoded]
+            for _ in range(t - 1):
+                coeffs.append(secrets.randbelow(self.prime))
+
+            # 为 i=1..n 评估多项式并追加到缓冲区
+            for i in range(1, n + 1):
+                y = self._eval_polynomial(coeffs, i)
+                buffers[i - 1] += int.to_bytes(y, length=val_len, byteorder="big", signed=False)
+
+            offset += size
+
+        # 打包输出：每位参与者一个 bytes。
+        return [(i + 1, bytes(buf)) for i, buf in enumerate(buffers)]
+
+    def recover_secret_large(self, shares: list[tuple[int, bytes]], t: int) -> bytes:
+        """
+        从 *大密钥* 份额恢复原文。
+
+        参数
+        ----
+        shares : 形如 ``[(share_id, packed_bytes), ...]`` 的列表；
+                 ``packed_bytes`` 是该参与者在每个分块上的 y 值串联，
+                 每个 y 值占 ``self.value_bytes`` 字节。
+        t      : 阈值。
+
+        返回
+        ----
+        bytes : 恢复的原始密钥。
+        """
+        if t < 2 or len(shares) < t:
+            raise ValueError("Need at least t shares for recovery (large-secret)")
+
+        # 检查：所有份额长度一致，且能被 value_bytes 整除
+        val_len = self.value_bytes
+        lengths = [len(p) for _, p in shares]
+        if len(set(lengths)) != 1:
+            raise ValueError("份额打包长度不一致，无法恢复（large-secret）")
+        if lengths[0] % val_len != 0:
+            raise ValueError("份额内容长度不是 value_bytes 的整数倍（large-secret）")
+
+        num_blocks = lengths[0] // val_len
+
+        # 选取前 t 份 *编号互异* 的份额作为插值输入
+        uniq = {}
+        for sid, payload in shares:
+            if sid not in uniq:
+                uniq[sid] = payload
+            if len(uniq) == t:
+                break
+        if len(uniq) < t:
+            raise ValueError("需要至少 t 份且编号互异的份额（large-secret）")
+
+        # 将选中的 t 份份额解包为 t 条 y 序列
+        selected = sorted(uniq.items(), key=lambda x: x[0])
+        y_lists = []
+        for _, packed in selected:
+            ys = [int.from_bytes(packed[i * val_len:(i + 1) * val_len], "big") for i in range(num_blocks)]
+            y_lists.append(ys)
+
+        # 逐块插值并解码
+        out = bytearray()
+        share_ids = [sid for sid, _ in selected]
+        for k in range(num_blocks):
+            shares_k = [(sid, y_lists[idx][k]) for idx, sid in enumerate(share_ids)]
+            const = self._lagrange_interpolate_zero(shares_k)
+            out += self._decode_secret(const)
+
+        return bytes(out)
+
+    # ---------------------- 基础功能（小密钥） ----------------------
     def _encode_secret(self, secret: bytes) -> int:
         # 将秘密字节串转换为整数，并附加2字节长度前缀用于精确恢复。
         if len(secret) > self.block_size:

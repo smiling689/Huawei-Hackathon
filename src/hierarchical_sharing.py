@@ -543,7 +543,7 @@ class HierarchicalSecretSharing:
 
             for share in shares:
                 if share.level != "master":
-                    raise ValueError("份额级别与目标密钥不匹配")
+                    raise ValueError("Invalid share level, 份额级别与目标密钥不匹配")
                 if share.id in meta["hq_ids"]:
                     hq_count += 1
                 elif share.id in meta["region_ids"].values():
@@ -596,7 +596,7 @@ class HierarchicalSecretSharing:
 
             for share in shares:
                 if share.level != "regional":
-                    raise ValueError("Security violation: share level mismatch")
+                    raise ValueError("Invalid share level, Security violation: share level mismatch")
                 if self.regional_share_map.get(share.id) != region_name:
                     raise ValueError("Security violation: incorrect regional share")
                 if share.id in meta["center_ids"]:
@@ -638,7 +638,7 @@ class HierarchicalSecretSharing:
             share_tuples = []
             for share in shares:
                 if share.level != "branch":
-                    raise ValueError("Security violation: share level mismatch")
+                    raise ValueError("Invalid share level, Security violation: share level mismatch")
                 if self.branch_share_map.get(share.id) != key_id:
                     raise ValueError("Security violation: incorrect branch share")
                 if not self.verify_share(share, "branch"):
