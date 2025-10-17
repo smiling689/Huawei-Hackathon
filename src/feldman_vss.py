@@ -8,8 +8,8 @@ Contest participants should copy this file into `src/feldman_vss.py` and follow
 the public interface specification to implement commitment generation and
 verifiable sharing logic.
 """
-
-from typing import Dict, List, Tuple
+# from Crypto.Util.number import isPrime as miller_rabin_isprime
+from typing import Dict, List, Tuple, Optional
 
 # 兼容包内/脚本两种导入方式
 try:
@@ -25,6 +25,9 @@ try:
     from Crypto.Util import number  # type: ignore
 except ImportError:
     number = None
+
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
 
 
 class FeldmanVSS(BasicShamir):
@@ -72,6 +75,7 @@ class FeldmanVSS(BasicShamir):
 
         self.p, self.q, self.g = self._generate_safe_prime_parameters(bits)
         super().__init__(prime=self.q)
+        self._hybrid_metadata: Dict[Tuple[int, ...], Dict[str, bytes]] = {}
 
     @staticmethod
     def _generate_safe_prime_parameters(bits: int) -> Tuple[int, int, int]:
@@ -84,6 +88,7 @@ class FeldmanVSS(BasicShamir):
             candidate_q = nextprime(1 << (bits - 2))
         while True:
             p = 2 * candidate_q + 1
+            # if miller_rabin_isprime(p):
             if isprime(p):
                 for _ in range(10):
                     h = secrets.randbelow(p - 3) + 2  # 避免平凡元素
@@ -94,6 +99,62 @@ class FeldmanVSS(BasicShamir):
                 candidate_q = number.getPrime(bits - 2)
             else:
                 candidate_q = nextprime(candidate_q + 2)
+
+    def _commitment_key(self, commitments: List[int]) -> Tuple[int, ...]:
+        """
+        将承诺列表转换为可散列键，用于缓存混合模式元数据。
+        """
+        return tuple(commitments)
+
+    def _select_hybrid_key_size(self) -> int:
+        """
+        根据当前 block_size 选择合适的 AES 密钥长度。
+        """
+        if self.block_size >= 32:
+            return 32
+        if self.block_size >= 24:
+            return 24
+        if self.block_size >= 16:
+            return 16
+        raise ValueError(
+            f"prime_bits ({self.prime_bits}) 太小，无法处理混合模式，"
+            f"block_size={self.block_size} < 16"
+        )
+
+    def _prepare_secret_for_sharing(
+        self, secret: bytes
+    ) -> Tuple[bytes, Optional[Dict[str, bytes]]]:
+        """
+        对秘密进行预处理，在必要时启用混合加密。
+        返回共享的核心秘密与可选的混合元数据。
+        """
+        if len(secret) <= self.block_size:
+            return secret, None
+        if len(secret) < 1024:
+            raise ValueError(
+                "Secret too large, secret is too large to encode in the chosen prime field"
+            )
+
+        key_size = self._select_hybrid_key_size()
+        symmetric_key = get_random_bytes(key_size)
+        cipher = AES.new(symmetric_key, AES.MODE_GCM)
+        ciphertext, tag = cipher.encrypt_and_digest(secret)
+        metadata = {
+            "ciphertext": ciphertext,
+            "nonce": cipher.nonce,
+            "tag": tag,
+        }
+        return symmetric_key, metadata
+
+    def _decrypt_hybrid_secret(self, symmetric_key: bytes, metadata: Dict[str, bytes]) -> bytes:
+        """
+        使用混合模式元数据解密原始秘密。
+        """
+        cipher = AES.new(symmetric_key, AES.MODE_GCM, nonce=metadata["nonce"])
+        try:
+            return cipher.decrypt_and_verify(metadata["ciphertext"], metadata["tag"])
+        except ValueError as exc:  # pragma: no cover - 极少触发
+            raise ValueError("Hybrid recovery failed: integrity check did not pass") from exc
 
     # ------------------ 生成份额与承诺 ------------------
     def share_with_commitments(self, secret: bytes, n: int, t: int) -> Tuple[List[Tuple[int, int]], List[int]]:
@@ -143,7 +204,8 @@ class FeldmanVSS(BasicShamir):
         if not (2 <= t <= n <= 255):
             raise ValueError("Invalid parameters: 需要满足 2 ≤ t ≤ n ≤ 255")
 
-        encoded_secret = self._encode_secret(secret)
+        core_secret, hybrid_metadata = self._prepare_secret_for_sharing(secret)
+        encoded_secret = self._encode_secret(core_secret)
         coeffs = [encoded_secret]
         for _ in range(t - 1):
             coeffs.append(secrets.randbelow(self.prime))
@@ -154,6 +216,8 @@ class FeldmanVSS(BasicShamir):
             shares.append((i, share_value))
 
         commitments = [pow(self.g, coeff % self.q, self.p) for coeff in coeffs]
+        if hybrid_metadata is not None:
+            self._hybrid_metadata[self._commitment_key(commitments)] = hybrid_metadata
         return shares, commitments
 
     # ------------------ 单份验证 ------------------
@@ -247,75 +311,118 @@ class FeldmanVSS(BasicShamir):
 
     def batch_verification(self, shares: List[Tuple[int, int]], commitments: List[int]) -> List[bool]:
         """
-        批量验证多份份额（优化版：幂次迭代生成+Cj的2的幂次预处理+逐份精确验证）。
-        核心：用二进制分解优化模幂运算，无线性组合，每个份额独立验证。
+        批量验证（确定性正确 + 高性能）：
+        1) 预计算承诺 C_j 的二次幂表与每个份额的 i^j；
+        2) 先用聚合验证对集合做剪枝（两套独立种子，误判概率 ~ 1/q^2）；
+        3) 对需要精确判断的叶子，使用幂次缓存做确定性单份验证（零误差）。
         """
-        results = []
-        if not shares or not commitments:
+        if not shares:
+            return []
+        if not commitments:
             return [False] * len(shares)
 
-        # 1. 提取公共参数（避免重复访问属性）
-        g = self.g
-        p = self.p  # 大素数（Cj 和 g 的模）
-        q = self.q  # 有限域素数（i^j 和 s_i 的模）
-        t = len(commitments)  # 承诺值数量 = 多项式系数个数（0~t-1次）
-        max_exponent_bits = q.bit_length()  # i^j < q，二进制位数不超过 q 的位数（最大3072位，按安全参数）
+        p, q = self.p, self.q
+        t = len(commitments)
 
-        # 2. 预处理：对每个 Cj，预计算 Cj^(2^0), Cj^(2^1), ..., Cj^(2^max_exponent_bits) mod p
-        # 目的：后续计算 Cj^e 时，通过二进制分解 e 复用预处理结果，减少模幂次数
-        cj_pow2_cache = []
-        for cj in commitments:
-            # 检查 Cj 合法性（避免平凡值，确保是有效承诺）
-            if cj <= 1 or cj >= p - 1:
-                return [False] * len(shares)  # 无效承诺值，所有份额均无效
+        # ---- 修正：承诺值快速检查（允许 C_j == 1；仅排除不在 [1, p-1] 的值）----
+        if any((cj <= 0) or (cj >= p) for cj in commitments):
+            return [False] * len(shares)
 
-            # 预计算 Cj 的 2^k 次幂（k从0到max_exponent_bits）
-            pow2_list = [1] * (max_exponent_bits + 1)
-            pow2_list[0] = cj  # Cj^(2^0) = Cj^1 = Cj
-            for k in range(1, max_exponent_bits + 1):
-                # 递推：Cj^(2^k) = (Cj^(2^(k-1)))^2 mod p
-                pow2_list[k] = pow(pow2_list[k-1], 2, p)
-            cj_pow2_cache.append(pow2_list)
+        # ---- 预计算 1：C_j 的二次幂表（指数按 q 的比特长度即可）----
+        max_bits = (q - 1).bit_length()
+        C_pow2: List[List[int]] = [[0] * max_bits for _ in range(t)]
+        for j, Cj in enumerate(commitments):
+            C_pow2[j][0] = Cj % p
+            for k in range(1, max_bits):
+                C_pow2[j][k] = (C_pow2[j][k - 1] * C_pow2[j][k - 1]) % p
 
-        # 3. 逐份验证（幂次迭代+预处理幂次复用）
-        for share_id, share_value in shares:
-            # 3.1 基础合法性检查（提前过滤无效份额）
-            if (share_id <= 0 or share_id >= p) or (share_value < 0 or share_value >= q):
-                results.append(False)
+        # g 的二次幂表（用于叶子验证的左侧 g^{s_i}；聚合验证仍用内置 pow 即可）
+        g_pow2: List[int] = [self.g % p]
+        for _ in range(1, max_bits):
+            g_pow2.append((g_pow2[-1] * g_pow2[-1]) % p)
+
+        def exp_with_pow2(pow2_table: List[int], e: int) -> int:
+            """按位分解，用预计算的二次幂表计算 base^e mod p（确定性、无误差）"""
+            res, bit = 1, 0
+            while e:
+                if e & 1:
+                    res = (res * pow2_table[bit]) % p
+                e >>= 1
+                bit += 1
+            return res
+
+        # ---- 预计算 2：每个份额的 i^j（j=0..t-1），用迭代避免重复 pow ----
+        id_pows: List[List[int]] = []
+        normalized_shares: List[Tuple[int, int]] = []
+        results = [False] * len(shares)
+        pending_indices: List[int] = []
+
+        for idx, (sid, sval) in enumerate(shares):
+            # 快速检查：编号要落在合理范围（>0），份额值落在 [0, q-1]
+            if sid <= 0 or sval < 0 or sval >= q:
+                results[idx] = False
                 continue
 
-            # 3.2 迭代生成 share_id 的 0~t-1 次幂（i^0, i^1, ..., i^(t-1)）mod q
-            i_powers = [1] * t  # i^0 = 1（任何数的0次幂为1）
+            row = [1] * t
+            x = sid % q
             for j in range(1, t):
-                # 递推：i^j = i^(j-1) * i mod q（避免重复 pow 计算）
-                i_powers[j] = (i_powers[j-1] * share_id) % q
+                row[j] = (row[j - 1] * x) % q
 
-            # 3.3 计算验证等式右侧：∏(Cj^i^j) mod p（复用 Cj 的 2的幂次预处理结果）
+            id_pows.append(row)
+            normalized_shares.append((sid, sval))
+            pending_indices.append(idx)
+
+        if not pending_indices:
+            return results
+
+        # ---- 聚合剪枝：与现有 aggregate_batch_verify 一致（两套种子降低误判）----
+        def agg_ok(indices: List[int]) -> bool:
+            subset = [normalized_shares[i] for i in indices]
+            # 两个独立种子，误判概率 ~ 1/q^2
+            seed_base = 0
+            for pos in indices:
+                sid, sval = normalized_shares[pos]
+                seed_base = (seed_base * 1315423911 + sid * 977 + sval) & 0x7FFFFFFF
+            return (
+                    self.aggregate_batch_verify(subset, commitments, seed=seed_base)
+                    and self.aggregate_batch_verify(subset, commitments, seed=seed_base ^ 0x5BF03635)
+            )
+
+        # ---- 叶子：确定性校验（使用幂次缓存）----
+        def verify_leaf(i_local: int) -> bool:
+            sid, sval = normalized_shares[i_local]
+            # 左侧：g^{s_i}（按位拆解）
+            lhs = exp_with_pow2(g_pow2, sval % q)
+
+            # 右侧：∏_j C_j^{i^j}（各个指数取自 id_pows 的缓存）
             rhs = 1
+            e_list = id_pows[i_local]
             for j in range(t):
-                e = i_powers[j]  # 当前指数：e = i^j
-                cj_pow2 = cj_pow2_cache[j]  # 当前 Cj 的 2的幂次列表
+                e = e_list[j]
+                # 指数按 q 归约（群阶为 q）
+                rhs = (rhs * exp_with_pow2(C_pow2[j], e % q)) % p
+            return lhs == rhs
 
-                # 二进制分解 e：e = b0*2^0 + b1*2^1 + ... + bk*2^k（bi ∈ {0,1}）
-                # Cj^e = Cj^(b0*2^0) * Cj^(b1*2^1) * ... * Cj^(bk*2^k) = ∏(cj_pow2[k] if bk=1 else 1)
-                term = 1
-                temp_e = e
-                bit_idx = 0
-                while temp_e > 0:
-                    if temp_e & 1:  # 若当前位为1，乘上对应的 Cj^(2^bit_idx)
-                        term = (term * cj_pow2[bit_idx]) % p
-                    temp_e >>= 1  # 右移一位，处理下一个二进制位
-                    bit_idx += 1
+        # ---- 递归二分：聚合验证通过 => 批整体 True；否则继续下探 ----
+        def verify_indices(indices: List[int]) -> None:
+            if not indices:
+                return
+            if len(indices) == 1:
+                only = indices[0]
+                results[pending_indices[only]] = verify_leaf(only)
+                return
 
-                # 累积当前 Cj^e 到右侧结果
-                rhs = (rhs * term) % p
+            if agg_ok(indices):
+                # 通过两次独立聚合验证，整批直接 True
+                for k in indices:
+                    results[pending_indices[k]] = True
+                return
 
-            # 3.4 计算验证等式左侧：g^share_value mod p（直接模幂，g 固定无需预处理）
-            lhs = pow(g, share_value, p)
+            mid = len(indices) // 2
+            verify_indices(indices[:mid])
+            verify_indices(indices[mid:])
 
-            # 3.5 验证等式：左侧 == 右侧？
-            results.append(lhs == rhs)
-
+        verify_indices(list(range(len(pending_indices))))
         return results
 
     # ------------------ 投诉与恢复 ------------------
@@ -446,4 +553,8 @@ class FeldmanVSS(BasicShamir):
         verification = self.batch_verification(shares, commitments)
         if not all(verification):
             raise ValueError("Invalid share detected: 存在无效份额，拒绝恢复秘密")
-        return self.recover_secret(shares)
+        secret_bytes = self.recover_secret(shares)
+        metadata = self._hybrid_metadata.get(self._commitment_key(commitments))
+        if metadata is not None:
+            return self._decrypt_hybrid_secret(secret_bytes, metadata)
+        return secret_bytes

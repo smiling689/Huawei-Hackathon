@@ -289,8 +289,8 @@ class BasicShamir:
             >>> shamir = BasicShamir()
             >>> shamir.recover_secret([(1, 10), (2, 20)])
         """
-        if not shares:
-            raise ValueError("Need at least 1 share")
+        if len(shares) < 2:
+            raise ValueError("Need at least 2 shares")
 
         if shares[0][0] > 0:
             return self._recover_secret_standard(shares)
@@ -403,55 +403,3 @@ class BasicShamir:
     def get_cached_prime(cls, bits: int) -> Optional[int]:
         """返回指定位数的缓存素数（如存在）。"""
         return cls._PRIME_CACHE.get(bits)
-
-# ### 测试代码 ###
-# if __name__ == "__main__":
-#     # --- 场景一：测试小秘密（应使用标准模式） ---
-#     print("====== 场景一：测试标准 Shamir 模式 (小秘密) ======")
-#     shamir_std = BasicShamir(prime_bits=256)
-#     small_secret = b"This is a small secret."
-#     n, t = 5, 3
-
-#     std_shares = shamir_std.split_secret(small_secret, n, t)
-#     recovered_small_secret = shamir_std.recover_secret([std_shares[0], std_shares[2], std_shares[4]])
-
-#     assert small_secret == recovered_small_secret
-#     print("✅ 标准模式恢复成功！\n")
-
-#     # --- 场景二：测试32KB大秘密，使用 prime_bits=256 ---
-#     # 此时 block_size=30，无法容纳32字节的AES-256密钥，应自动降级使用24字节的AES-192密钥。
-#     print("====== 场景二：测试混合加密模式 (prime_bits=256, 32KB Secret) ======")
-#     shamir_hybrid = BasicShamir(prime_bits=256)
-#     large_secret = get_random_bytes(32 * 1024)
-
-#     print(f"原始大秘密长度: {len(large_secret)} 字节")
-#     print(f"使用的 block_size: {shamir_hybrid.block_size} 字节")
-
-#     hybrid_shares = shamir_hybrid.split_secret(large_secret, n, t)
-
-#     # 验证内部使用的AES密钥长度是否符合预期（24字节）
-#     # 我们通过恢复密钥并检查其长度来间接验证
-#     key_shares_only = hybrid_shares[4:]
-#     recovered_key = shamir_hybrid.recover_secret(key_shares_only)
-#     print(f"混合加密内部使用的AES密钥长度为: {len(recovered_key)} 字节 (预期为24)")
-#     assert len(recovered_key) == 24
-
-#     # 恢复时，需要提供元数据份额 + 至少t个密钥份额
-#     shares_for_recovery_hybrid = hybrid_shares[:4] + [hybrid_shares[4], hybrid_shares[6], hybrid_shares[8]]
-#     recovered_large_secret = shamir_hybrid.recover_secret(shares_for_recovery_hybrid)
-
-#     assert large_secret == recovered_large_secret
-#     print(f"恢复的大秘密长度: {len(recovered_large_secret)} 字节")
-#     print("✅ 混合加密模式恢复成功！错误已修复。\n")
-
-#     # --- 场景三：测试必须使用AES-256密钥的场景 ---
-#     # 需要初始化时指定更大的 prime_bits
-#     print("====== 场景三：测试必须使用AES-256的混合加密 (prime_bits=272) ======")
-#     shamir_aes256 = BasicShamir(prime_bits=272) # block_size = 32
-#     print(f"使用的 block_size: {shamir_aes256.block_size} 字节")
-
-#     shares3 = shamir_aes256.split_secret(large_secret, n, t)
-#     recovered_key3 = shamir_aes256.recover_secret(shares3[4:])
-#     print(f"混合加密内部使用的AES密钥长度为: {len(recovered_key3)} 字节 (预期为32)")
-#     assert len(recovered_key3) == 32
-#     print("✅ 确认能根据更大的 block_size 选择更强的AES密钥。")

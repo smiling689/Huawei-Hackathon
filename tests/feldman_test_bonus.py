@@ -8,7 +8,7 @@ src_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.append(src_dir)  # 将 src 目录加入搜索路径
 
 # 导入类
-from feldman_vss import FeldmanVSS
+from src.feldman_vss import FeldmanVSS
 
 
 def assert_equal(actual, expected, msg: str):
@@ -192,7 +192,7 @@ def main():
     print("开始测试 FeldmanVSS.batch_verification 函数")
     print("=" * 60)
 
-    # 初始化FeldmanVSS实例（bits=128，平衡速度与安全性）
+    # 初始化FeldmanVSS实例（bits=256，平衡速度与安全性）
     try:
         vss = FeldmanVSS(bits=256)
         print(f"\n✅ VSS实例初始化成功（p={vss.p}, q={vss.q}, g={vss.g}）")
