@@ -2,15 +2,15 @@ import math
 import os
 import secrets
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-try:  # 兼容直接运行与作为包导入两种场景
-    from .hierarchical_sharing import HierarchicalSecretSharing, Share
-except ImportError:  # pragma: no cover
-    from hierarchical_sharing import HierarchicalSecretSharing, Share
+from src.basic_shamir import BasicShamir
+from src.feldman_vss import FeldmanVSS
+from src.hierarchical_sharing import HierarchicalSecretSharing, Share
+from src.proactive_sharing import ProactiveSecretSharing
 
 
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -21,6 +21,8 @@ CORS(app)
 
 SESSION_ID = "demo_session"
 systems: Dict[str, Dict] = {}
+DEMO_RUNS: Dict[str, Dict[str, Any]] = {}
+DEMO_TTL_SECONDS = 900
 
 REGION_DISPLAY_NAMES = {
     "asia": "亚太区",
@@ -80,6 +82,28 @@ def serialize_share(share: Share, label_map: Optional[Dict[str, str]] = None) ->
 
 def serialize_commitments(commitments: List[int]) -> List[str]:
     return [str(c) for c in commitments]
+
+
+def _plain_share_dicts(shares: List[Tuple[int, int]]) -> List[Dict[str, object]]:
+    return [{"id": int(sid), "value": str(value)} for sid, value in shares]
+
+
+def _purge_demo_runs(ttl: int = DEMO_TTL_SECONDS) -> None:
+    cutoff = time.time() - ttl
+    stale_keys = [key for key, record in DEMO_RUNS.items() if record.get("timestamp", 0) < cutoff]
+    for key in stale_keys:
+        DEMO_RUNS.pop(key, None)
+
+
+def _register_demo_run(record: Dict[str, Any]) -> str:
+    demo_id = secrets.token_hex(8)
+    record["timestamp"] = time.time()
+    DEMO_RUNS[demo_id] = record
+    return demo_id
+
+
+def _get_demo_run(demo_id: str) -> Optional[Dict[str, Any]]:
+    return DEMO_RUNS.get(demo_id)
 
 
 def clone_share(share: Share) -> Share:
@@ -251,6 +275,329 @@ def initialize_system():
             "limits": systems[SESSION_ID]["limits"],
         }
     )
+
+
+@app.route("/api/demo_split", methods=["POST"])
+def demo_split():
+    _purge_demo_runs()
+    data = request.get_json(silent=True) or {}
+    backend = str(data.get("backend", "basic_shamir")).strip().lower()
+    secret_raw = data.get("secret", "")
+    if not isinstance(secret_raw, str):
+        secret_raw = str(secret_raw)
+    secret_bytes = secret_raw.encode("utf-8")
+
+    supported_backends = {"basic_shamir", "feldman_vss", "hierarchical_sharing", "proactive_sharing"}
+    if backend not in supported_backends:
+        return jsonify({"status": "error", "message": "Unsupported backend specified."}), 400
+
+    try:
+        n_val = data.get("n")
+        n = int(n_val) if n_val is not None else None
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Parameter 'n' must be an integer."}), 400
+    try:
+        t_val = data.get("t")
+        t = int(t_val) if t_val is not None else None
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Parameter 't' must be an integer."}), 400
+
+    response_payload: Dict[str, Any] = {"backend": backend, "secret_preview": secret_raw[:32]}
+
+    try:
+        if backend == "basic_shamir":
+            if n is None or t is None:
+                return jsonify({"status": "error", "message": "Parameters 'n' and 't' are required."}), 400
+            if not (2 <= t <= n <= 255):
+                return jsonify({"status": "error", "message": "Invalid parameters: need 2 ≤ t ≤ n ≤ 255."}), 400
+
+            engine = BasicShamir()
+            shares = engine.split_secret(secret_bytes, n, t)
+
+            demo_id = _register_demo_run(
+                {
+                    "backend": backend,
+                    "engine": engine,
+                    "shares": shares,
+                    "threshold": t,
+                    "n": n,
+                }
+            )
+
+            response_payload.update(
+                {
+                    "status": "success",
+                    "demo_id": demo_id,
+                    "shares": _plain_share_dicts(shares),
+                    "threshold": t,
+                    "n": n,
+                    "parameters": {
+                        "prime": str(engine.prime),
+                        "prime_bits": engine.prime_bits,
+                        "block_size": engine.block_size,
+                    },
+                }
+            )
+            return jsonify(response_payload)
+
+        if backend == "feldman_vss":
+            if n is None or t is None:
+                return jsonify({"status": "error", "message": "Parameters 'n' and 't' are required."}), 400
+            if not (2 <= t <= n <= 255):
+                return jsonify({"status": "error", "message": "Invalid parameters: need 2 ≤ t ≤ n ≤ 255."}), 400
+
+            engine = FeldmanVSS(bits=256)
+            shares, commitments = engine.share_with_commitments(secret_bytes, n, t)
+            demo_id = _register_demo_run(
+                {
+                    "backend": backend,
+                    "engine": engine,
+                    "shares": shares,
+                    "commitments": commitments,
+                    "threshold": t,
+                    "n": n,
+                }
+            )
+
+            response_payload.update(
+                {
+                    "status": "success",
+                    "demo_id": demo_id,
+                    "shares": _plain_share_dicts(shares),
+                    "threshold": t,
+                    "n": n,
+                    "commitments": serialize_commitments(commitments),
+                    "group_params": {"p": str(engine.p), "q": str(engine.q), "g": str(engine.g)},
+                }
+            )
+            return jsonify(response_payload)
+
+        if backend == "hierarchical_sharing":
+            branch_count = n if n is not None else 5
+            if branch_count < 3:
+                return jsonify({"status": "error", "message": "Need at least 3 branches for hierarchical demo."}), 400
+            branches = [f"demo_branch_{idx}" for idx in range(1, branch_count + 1)]
+            hss = HierarchicalSecretSharing(vss_bits=256)
+            key_data = hss.create_branch_key(secret_bytes, branches)
+            shares: List[Share] = key_data["shares"]
+            commitments = key_data["commitments"]
+            key_id = key_data.get("key_id")
+            meta = hss.branch_keys.get(key_id, {})
+            threshold = int(meta.get("threshold", 3))
+            snapshots = snapshot_shares(shares)
+
+            share_lookup = {snap["id"]: snap for snap in snapshots}
+            demo_id = _register_demo_run(
+                {
+                    "backend": backend,
+                    "engine": hss,
+                    "key_id": key_id,
+                    "commitments": commitments,
+                    "threshold": threshold,
+                    "n": len(shares),
+                    "share_lookup": share_lookup,
+                    "level": "branch",
+                }
+            )
+
+            response_payload.update(
+                {
+                    "status": "success",
+                    "demo_id": demo_id,
+                    "shares": [serialize_share(share) for share in shares],
+                    "threshold": threshold,
+                    "n": len(shares),
+                    "commitments": serialize_commitments(commitments),
+                    "group_params": {"p": str(hss.vss.p), "q": str(hss.vss.q), "g": str(hss.vss.g)},
+                    "note": "分行级共享示例，阈值固定为 3。",
+                }
+            )
+            return jsonify(response_payload)
+
+        if backend == "proactive_sharing":
+            if n is None or t is None:
+                return jsonify({"status": "error", "message": "Parameters 'n' and 't' are required."}), 400
+            if not (2 <= t <= n <= 255):
+                return jsonify({"status": "error", "message": "Invalid parameters: need 2 ≤ t ≤ n ≤ 255."}), 400
+
+            engine = FeldmanVSS(bits=256)
+            shares, commitments = engine.share_with_commitments(secret_bytes, n, t)
+            refresh_interval = int(data.get("refresh_interval", 60))
+            proactive = ProactiveSecretSharing(engine, refresh_interval=refresh_interval)
+            refreshed_shares, refresh_coeffs = proactive.active_refresh_with_coeffs(shares, n, t)
+
+            demo_id = _register_demo_run(
+                {
+                    "backend": backend,
+                    "engine": engine,
+                    "proactive": proactive,
+                    "shares": shares,
+                    "refreshed_shares": refreshed_shares,
+                    "commitments": commitments,
+                    "threshold": t,
+                    "n": n,
+                }
+            )
+
+            response_payload.update(
+                {
+                    "status": "success",
+                    "demo_id": demo_id,
+                    "shares": _plain_share_dicts(shares),
+                    "refreshed_shares": _plain_share_dicts(refreshed_shares),
+                    "threshold": t,
+                    "n": n,
+                    "commitments": serialize_commitments(commitments),
+                    "group_params": {"p": str(engine.p), "q": str(engine.q), "g": str(engine.g)},
+                    "refresh_polynomial": [str(coeff) for coeff in refresh_coeffs],
+                    "note": f"刷新周期 {refresh_interval} 秒示例，已立即执行一次主动刷新。",
+                }
+            )
+            return jsonify(response_payload)
+
+        return jsonify({"status": "error", "message": "Backend handler missing."}), 500
+    except ValueError as exc:
+        app.logger.error("Demo split error: %s", exc, exc_info=True)
+        return jsonify({"status": "error", "message": str(exc)}), 400
+    except Exception as exc:  # pragma: no cover
+        app.logger.error("Unexpected demo split error: %s", exc, exc_info=True)
+        return jsonify({"status": "error", "message": "Failed to generate demo shares."}), 500
+
+
+@app.route("/api/demo_recover", methods=["POST"])
+def demo_recover():
+    _purge_demo_runs()
+    data = request.get_json(silent=True) or {}
+    demo_id = data.get("demo_id")
+    if not demo_id:
+        return jsonify({"status": "error", "message": "Parameter 'demo_id' is required."}), 400
+
+    record = _get_demo_run(str(demo_id))
+    if record is None:
+        return jsonify({"status": "error", "message": "Demo session not found or expired."}), 404
+
+    shares_payload = data.get("shares")
+    if not isinstance(shares_payload, list) or not shares_payload:
+        return jsonify({"status": "error", "message": "Parameter 'shares' must be a non-empty list."}), 400
+
+    backend = record.get("backend")
+    try:
+        if backend == "basic_shamir":
+            engine: BasicShamir = record["engine"]
+            sanitized_shares = []
+            for entry in shares_payload:
+                share_id = int(entry["id"])
+                share_value = int(entry["value"])
+                sanitized_shares.append((share_id, share_value))
+            threshold = int(record.get("threshold", 0))
+            if len(sanitized_shares) < threshold:
+                return jsonify({"status": "error", "message": f"Need at least {threshold} shares to recover."}), 400
+            secret_bytes = engine.recover_secret(sanitized_shares)
+            recovered_text = secret_bytes.decode("utf-8", errors="ignore")
+            return jsonify(
+                {
+                    "status": "success",
+                    "backend": backend,
+                    "demo_id": demo_id,
+                    "recovered_secret": recovered_text,
+                    "recovered_hex": secret_bytes.hex(),
+                    "used_shares": len(sanitized_shares),
+                }
+            )
+
+        if backend == "feldman_vss":
+            engine: FeldmanVSS = record["engine"]
+            commitments = record.get("commitments") or []
+            sanitized_shares = []
+            for entry in shares_payload:
+                share_id = int(entry["id"])
+                share_value = int(entry["value"])
+                sanitized_shares.append((share_id, share_value))
+            threshold = int(record.get("threshold", 0))
+            if len(sanitized_shares) < threshold:
+                return jsonify({"status": "error", "message": f"Need at least {threshold} shares to recover."}), 400
+            secret_bytes = engine.recover_secret_from_shares(sanitized_shares, commitments)
+            recovered_text = secret_bytes.decode("utf-8", errors="ignore")
+            verifications = engine.batch_verification(sanitized_shares, commitments)
+            return jsonify(
+                {
+                    "status": "success",
+                    "backend": backend,
+                    "demo_id": demo_id,
+                    "recovered_secret": recovered_text,
+                    "recovered_hex": secret_bytes.hex(),
+                    "used_shares": len(sanitized_shares),
+                    "verification": all(verifications),
+                }
+            )
+
+        if backend == "hierarchical_sharing":
+            hss: HierarchicalSecretSharing = record["engine"]
+            level = record.get("level", "branch")
+            share_lookup: Dict[int, Dict[str, Any]] = record.get("share_lookup", {})
+            share_objects: List[Share] = []
+            for entry in shares_payload:
+                share_id = int(entry["id"])
+                share_value = int(entry["value"])
+                snapshot = share_lookup.get(share_id, {})
+                holder = entry.get("holder") or snapshot.get("holder", f"demo_branch_{share_id}")
+                secret_length = snapshot.get("secret_length")
+                share_objects.append(
+                    Share(
+                        id=share_id,
+                        value=share_value,
+                        holder=holder,
+                        level=entry.get("level", snapshot.get("level", level)),
+                        secret_length=secret_length,
+                    )
+                )
+            threshold = int(record.get("threshold", 0))
+            if len(share_objects) < threshold:
+                return jsonify({"status": "error", "message": f"Need at least {threshold} shares to recover."}), 400
+            secret_bytes = hss.cascade_recovery(level, share_objects)
+            recovered_text = secret_bytes.decode("utf-8", errors="ignore")
+            return jsonify(
+                {
+                    "status": "success",
+                    "backend": backend,
+                    "demo_id": demo_id,
+                    "recovered_secret": recovered_text,
+                    "recovered_hex": secret_bytes.hex(),
+                    "used_shares": len(share_objects),
+                }
+            )
+
+        if backend == "proactive_sharing":
+            engine: FeldmanVSS = record["engine"]
+            commitments = record.get("commitments") or []
+            sanitized_shares = []
+            for entry in shares_payload:
+                share_id = int(entry["id"])
+                share_value = int(entry["value"])
+                sanitized_shares.append((share_id, share_value))
+            threshold = int(record.get("threshold", 0))
+            if len(sanitized_shares) < threshold:
+                return jsonify({"status": "error", "message": f"Need at least {threshold} shares to recover."}), 400
+            secret_bytes = engine.recover_secret_from_shares(sanitized_shares, commitments)
+            recovered_text = secret_bytes.decode("utf-8", errors="ignore")
+            return jsonify(
+                {
+                    "status": "success",
+                    "backend": backend,
+                    "demo_id": demo_id,
+                    "recovered_secret": recovered_text,
+                    "recovered_hex": secret_bytes.hex(),
+                    "used_shares": len(sanitized_shares),
+                }
+            )
+
+        return jsonify({"status": "error", "message": "Unsupported backend for recovery."}), 400
+    except ValueError as exc:
+        app.logger.error("Demo recover error: %s", exc, exc_info=True)
+        return jsonify({"status": "error", "message": str(exc)}), 400
+    except Exception as exc:  # pragma: no cover
+        app.logger.error("Unexpected demo recover error: %s", exc, exc_info=True)
+        return jsonify({"status": "error", "message": "Failed to recover demo secret."}), 500
 
 
 @app.route("/api/create_key", methods=["POST"])
