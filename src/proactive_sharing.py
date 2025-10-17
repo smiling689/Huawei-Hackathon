@@ -157,6 +157,9 @@ class ProactiveSecretSharing:
                 if share_id not in delta_sums:
                     raise ValueError("份额编号与刷新贡献不一致")
                 delta_sums[share_id] = (delta_sums[share_id] + delta_value) % self.prime
+            if participant_id in delta_sums:
+                self_delta = self._evaluate_delta(refresh_info["polynomial"], participant_id)
+                delta_sums[participant_id] = (delta_sums[participant_id] + self_delta) % self.prime
 
         new_shares = []
         for share_id, share_value in old_shares:
@@ -204,7 +207,45 @@ class ProactiveSecretSharing:
         Example:
             >>> ProactiveSecretSharing().active_refresh_with_coeffs([(1, 10)], 1, 1)
         """
-        return [], []
+        if not old_shares:
+            raise ValueError("old_shares 不能为空")
+        if n != len(old_shares):
+            raise ValueError("n 必须与旧份额数量一致")
+        if not (2 <= t <= n):
+            raise ValueError("需要满足 2 ≤ t ≤ n")
+
+        share_ids = [share_id for share_id, _ in old_shares]
+        if len(set(share_ids)) != len(share_ids):
+            raise ValueError("旧份额中存在重复编号")
+
+        delta_sums = {share_id: 0 for share_id in share_ids}
+        aggregated_coeffs = [0] * t
+
+        for participant_id in range(1, n + 1):
+            refresh_info = self.generate_refresh_polynomial(participant_id, n, t)
+            coeffs = refresh_info["polynomial"]
+            if len(coeffs) != t:
+                raise ValueError("刷新多项式系数长度异常")
+
+            for idx in range(t):
+                aggregated_coeffs[idx] = (aggregated_coeffs[idx] + coeffs[idx]) % self.prime
+
+            for share_id, delta_value in refresh_info["shares"]:
+                if share_id not in delta_sums:
+                    raise ValueError("份额编号与刷新贡献不一致")
+                delta_sums[share_id] = (delta_sums[share_id] + delta_value) % self.prime
+            if participant_id in delta_sums:
+                self_delta = self._evaluate_delta(refresh_info["polynomial"], participant_id)
+                delta_sums[participant_id] = (delta_sums[participant_id] + self_delta) % self.prime
+
+        new_shares = []
+        for share_id, share_value in old_shares:
+            updated_value = (share_value + delta_sums[share_id]) % self.prime
+            new_shares.append((share_id, updated_value))
+
+        self.epoch += 1
+        self.last_refresh_time = time.time()
+        return new_shares, aggregated_coeffs
 
     def schedule_automatic_refresh(self) -> bool:
         """
@@ -283,11 +324,13 @@ class ProactiveSecretSharing:
         coefficients = self._generate_zero_polynomial(t)
         contributions = []
         for share_id in range(1, n + 1):
+            if share_id == participant_id:
+                continue
             contributions.append((share_id, self._evaluate_delta(coefficients, share_id)))
 
         return {
             "polynomial": coefficients,
             "shares": contributions,
             "epoch": self.epoch + 1,
+            "commitments": [],
         }
-
