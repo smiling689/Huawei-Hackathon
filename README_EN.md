@@ -7,7 +7,7 @@
   - `FeldmanVSS`: adds public commitments, share verification, and complaint handling.
   - `ProactiveSecretSharing`: keeps shares fresh through proactive refresh cycles.
   - `HierarchicalSecretSharing`: combines the above modules for headquarters–regional–branch workflows.
-- **Reference docs:** `API_SPECIFICATION.md` describes the public contracts; `tests/basic/UNIT_TEST_SPECIFICATION.md` outlines the basic test scenarios.
+- **Reference doc:** `tests/basic/UNIT_TEST_SPECIFICATION.md` outlines the basic test scenarios.
 
 ## Directory Layout
 - `templates/`: official API skeletons. Treat them as reference; copy into `src/` before editing.
@@ -20,7 +20,7 @@
 
 ## Development Workflow
 1. **Copy templates:** Move `templates/*.py` into `src/` with identical filenames and implement the TODO sections.
-2. **Honor API contracts:** Match method signatures, return values, and exception messages exactly as documented (e.g., include key phrases like "Invalid parameters" or "Secret too large").
+2. **Honor API contracts:** Match method signatures, return values, and exception messages exactly as the templates specify (e.g., include key phrases like "Invalid parameters" or "Secret too large").
 3. **Iterative build-up:** Implement `BasicShamir` first, then `FeldmanVSS`, `ProactiveSecretSharing`, and finally assemble `HierarchicalSecretSharing`, running the matching tests after each milestone.
 4. **Audit & commitments:** Populate the logging and commitment fields left in the templates to satisfy the higher-level orchestration tests.
 
@@ -40,7 +40,7 @@
   ```bash
   python tests/run_extended_tests.py
   ```
-  - Follows the flow described in `FLOW_OVERVIEW.md`: multi-level distribution, share verification, complaint generation, and post-refresh recovery.
+  - Covers the full lifecycle: multi-level distribution, share verification, complaint generation, and post-refresh recovery.
 - **Single test files**: Execute `tests/basic/unit_test_*.py` or `tests/extended/test_flow_integration.py` directly for focused debugging.
 
 ### Coverage Highlights
@@ -60,7 +60,8 @@
   ```
 
 ## Additional Notes
-- **Language choice:** You may implement the core algorithms in a non-Python language (e.g., C/C++, Rust) as long as they expose Python-callable bindings; the official tests invoke the APIs from Python.
+- **Language choice:** **You may implement the core algorithms in a non-Python language** (e.g., C/C++, Rust) as long as they expose Python-callable bindings; the official tests invoke the APIs from Python.
+- **Secret size:** *Baseline implementation* must reject secrets longer than `block_size` by raising `ValueError` (the official unit tests only cover this scenario). *Extended implementation* should handle oversized secrets while satisfying subproblems 1–4; you may adjust or add interfaces as needed. Showcase the extended design during demos and presentations, and expect reference checks via extended tests.
 - **Error messages:** Tests assert against specific message fragments, so reproduce the wording shown in the templates.
 - **Field and commitments:** Ensure the field parameters used by `BasicShamir` and `FeldmanVSS` remain consistent with proactive refresh logic, and synchronize commitments during refresh.
 - **Hierarchical thresholds:** Enforce the documented share requirements (HQ + regions, region centers + ≥60% branches, at least three branch shares) and raise errors containing the expected keywords when validation fails.

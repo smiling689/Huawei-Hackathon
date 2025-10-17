@@ -7,7 +7,7 @@
   - `FeldmanVSS`：在基础方案上加入承诺验证与投诉机制。
   - `ProactiveSecretSharing`：主动刷新份额，保持长期密钥安全。
   - `HierarchicalSecretSharing`：整合上述模块，覆盖总部-区域-分行的层级架构。
-- **参考文档：** `API_SPECIFICATION.md` 概述接口契约，`tests/basic/UNIT_TEST_SPECIFICATION.md` 给出基础测例说明。
+- **参考文档：** `tests/basic/UNIT_TEST_SPECIFICATION.md` 给出基础测例说明。
 
 ## 目录结构
 - `templates/`：官方提供的 API 模板文件。建议复制到 `src/` 中作为起点。
@@ -20,7 +20,7 @@
 
 ## 开发流程
 1. **复制模板：** 将 `templates/*.py` 复制到 `src/` 中（保持文件名一致），并根据注释完成实现。
-2. **遵循接口约定：** 所有公开方法的参数、返回值、异常信息需与模板及 `API_SPECIFICATION.md` 保持一致，尤其是错误信息中的关键字（如 "Invalid parameters"、"Secret too large" 等）。
+2. **遵循接口约定：** 所有公开方法的参数、返回值、异常信息需与模板保持一致，尤其是错误信息中的关键字（如 "Invalid parameters"、"Secret too large" 等）。
 3. **分阶段实现：** 建议先实现 `BasicShamir`，再完成 `FeldmanVSS`、`ProactiveSecretSharing`，最后组合出 `HierarchicalSecretSharing`，并在每一步运行对应测试。
 4. **记录审计信息：** 模板中预留了审计日志、承诺缓存等字段，实际实现时应遵循文档约束。
 
@@ -40,7 +40,7 @@
   ```bash
   python tests/run_extended_tests.py
   ```
-  - 模拟 `FLOW_OVERVIEW.md` 中的完整业务流程：生成多层份额、验证持有者、执行恢复、检测恶意份额并生成投诉、刷新后再次恢复。
+  - 模拟完整业务流程：生成多层份额、验证持有者、执行恢复、检测恶意份额并生成投诉、刷新后再次恢复。
 - **运行单个测试文件：** 可直接执行 `tests/basic/unit_test_*.py` 或 `tests/extended/test_flow_integration.py` 以排查问题。
 
 ### 测试覆盖摘要
@@ -60,7 +60,8 @@
   ```
 
 ## 其他说明
-- **语言选择：** 可以使用非 Python 语言（如 C/C++、Rust 等）实现核心算法，但需要提供可被 Python 调用的接口；测试脚本会严格按照 Python API 进行调用。
+- **语言选择：** **可以使用非 Python 语言**（如 C/C++、Rust 等）实现核心算法，但需要提供可被 Python 调用的接口；测试脚本会严格按照 Python API 进行调用。
+- **秘密大小：** 【基础实现】需确保秘密长度不超过 `block_size`，超出时抛出 `ValueError`（官方单测仅覆盖此情形）。【扩展实现】需支持超长秘密并满足子问题 1～4，可根据设计调整或新增接口；若完成扩展，请在演示与答辩材料中说明，我们也会参考扩展测试脚本进行验证。
 - **保持错误信息一致：** 单元测试会对异常信息做字符串匹配，请按模板中的提示返回精确短语。
 - **有限域与承诺：** `BasicShamir` 与 `FeldmanVSS` 对素数、生成元的选取有严格要求，应确保与刷新模块共享同一有限域，并在刷新时同步更新承诺。
 - **层级阈值：** 层级恢复必须满足各自的最小份额要求（HQ+区域、区域中心+60%分行、至少3个分行），否则应抛出含指定关键字的异常。

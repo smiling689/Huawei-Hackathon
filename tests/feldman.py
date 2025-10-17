@@ -192,7 +192,7 @@ def main():
     print("开始测试 FeldmanVSS.batch_verification 函数")
     print("=" * 60)
 
-    # 初始化FeldmanVSS实例（bits=128，平衡速度与安全性）
+    # 初始化FeldmanVSS实例（bits=256，平衡速度与安全性）
     try:
         vss = FeldmanVSS(bits=256)
         print(f"\n✅ VSS实例初始化成功（p={vss.p}, q={vss.q}, g={vss.g}）")
