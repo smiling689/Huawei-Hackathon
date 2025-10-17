@@ -10,6 +10,9 @@ periodic refresh and polynomial generation logic described by the public API.
 
 import time
 from typing import Dict, List, Optional, Tuple
+import secrets
+
+from src.basic_shamir import BasicShamir
 
 
 class ProactiveSecretSharing:
@@ -57,11 +60,42 @@ class ProactiveSecretSharing:
         Example:
             >>> pss = ProactiveSecretSharing(refresh_interval=10)
         """
+        # if prime_bits < 32:
+        #     raise ValueError("prime_bits 过小，无法提供安全的有限域")
+
         self.refresh_interval = refresh_interval
         self.prime_bits = prime_bits
-        self.prime = prime
-        self.last_refresh_time = time.time()
         self.epoch = 0
+        self.last_refresh_time = time.time()
+
+        cached_prime = prime or BasicShamir.get_cached_prime(prime_bits)
+        if cached_prime is None:
+            cached_prime = BasicShamir(prime_bits=prime_bits).prime
+        self.prime = cached_prime
+        # self.last_refresh_details: Dict[int, Dict[str, object]] = {}
+
+
+    def _generate_zero_polynomial(self, t: int) -> List[int]:
+        """
+        生成零常数项的随机多项式系数列表: [0, b1, b2, ..., b_{t-1}].
+        """
+        coefficients = [0]
+        for _ in range(1, t):
+            coefficients.append(secrets.randbelow(self.prime))
+        return coefficients
+
+    def _evaluate_delta(self, coeffs: List[int], x: int) -> int:
+        """
+        计算 δ(x)，其中 coeffs[0] = 0。
+        """
+        result = 0
+        power = x % self.prime
+        for coeff in coeffs[1:]:
+            result = (result + coeff * power) % self.prime
+            power = (power * x) % self.prime
+        return result
+
+
 
     def active_refresh(self, old_shares: List[Tuple[int, int]], n: int, t: int) -> List[Tuple[int, int]]:
         """
@@ -101,7 +135,38 @@ class ProactiveSecretSharing:
         Example:
             >>> ProactiveSecretSharing().active_refresh([(1, 10), (2, 20)], 2, 2)
         """
-        return []
+        if not old_shares:
+            raise ValueError("old_shares 不能为空")
+        if n != len(old_shares):
+            raise ValueError("n 必须与旧份额数量一致")
+        if not (2 <= t <= n):
+            raise ValueError("需要满足 2 ≤ t ≤ n")
+
+        # 检查份额编号唯一性，并初始化增量累加器。
+        share_ids = [share_id for share_id, _ in old_shares]
+        if len(set(share_ids)) != len(share_ids):
+            raise ValueError("旧份额中存在重复编号")
+
+        delta_sums = {share_id: 0 for share_id in share_ids}
+        # self.last_refresh_details = {}
+
+        for participant_id in range(1, n + 1):
+            refresh_info = self.generate_refresh_polynomial(participant_id, n, t)
+            # self.last_refresh_details[participant_id] = refresh_info
+            for share_id, delta_value in refresh_info["shares"]:
+                if share_id not in delta_sums:
+                    raise ValueError("份额编号与刷新贡献不一致")
+                delta_sums[share_id] = (delta_sums[share_id] + delta_value) % self.prime
+
+        new_shares = []
+        for share_id, share_value in old_shares:
+            updated_value = (share_value + delta_sums[share_id]) % self.prime
+            new_shares.append((share_id, updated_value))
+
+        self.epoch += 1
+        self.last_refresh_time = time.time()
+        return new_shares
+
 
     def active_refresh_with_coeffs(self, old_shares: List[Tuple[int, int]], n: int, t: int) -> Tuple[List[Tuple[int, int]], List[int]]:
         """
@@ -163,7 +228,7 @@ class ProactiveSecretSharing:
         Example:
             >>> ProactiveSecretSharing().schedule_automatic_refresh()
         """
-        return False
+        return (time.time() - self.last_refresh_time) >= self.refresh_interval
 
     def generate_refresh_polynomial(self, participant_id: int, n: int, t: int) -> Dict:
         """
@@ -210,4 +275,19 @@ class ProactiveSecretSharing:
         Example:
             >>> ProactiveSecretSharing().generate_refresh_polynomial(1, 5, 3)
         """
-        return {}
+        if not (1 <= participant_id <= n):
+            raise ValueError("参与者编号超出范围")
+        if not (2 <= t <= n):
+            raise ValueError("参数需满足 2 ≤ t ≤ n")
+
+        coefficients = self._generate_zero_polynomial(t)
+        contributions = []
+        for share_id in range(1, n + 1):
+            contributions.append((share_id, self._evaluate_delta(coefficients, share_id)))
+
+        return {
+            "polynomial": coefficients,
+            "shares": contributions,
+            "epoch": self.epoch + 1,
+        }
+
