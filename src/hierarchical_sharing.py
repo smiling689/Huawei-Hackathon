@@ -14,8 +14,8 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any
 
-from .feldman_vss import FeldmanVSS
-from .proactive_sharing import ProactiveSecretSharing
+from feldman_vss import FeldmanVSS
+from proactive_sharing import ProactiveSecretSharing
 
 
 @dataclass

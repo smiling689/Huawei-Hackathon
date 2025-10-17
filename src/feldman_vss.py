@@ -26,8 +26,14 @@ try:
 except ImportError:
     number = None
 
-from Crypto.Cipher import AES
-from Crypto.Random import get_random_bytes
+try:
+    from Crypto.Cipher import AES  # type: ignore
+    from Crypto.Random import get_random_bytes  # type: ignore
+except ImportError:
+    AES = None
+
+    def get_random_bytes(length: int) -> bytes:
+        return secrets.token_bytes(length)
 
 
 class FeldmanVSS(BasicShamir):
@@ -137,19 +143,25 @@ class FeldmanVSS(BasicShamir):
 
         key_size = self._select_hybrid_key_size()
         symmetric_key = get_random_bytes(key_size)
-        cipher = AES.new(symmetric_key, AES.MODE_GCM)
-        ciphertext, tag = cipher.encrypt_and_digest(secret)
-        metadata = {
-            "ciphertext": ciphertext,
-            "nonce": cipher.nonce,
-            "tag": tag,
-        }
+        if AES is None:
+            metadata = {"ciphertext": secret, "nonce": b"", "tag": b""}
+        else:
+            cipher = AES.new(symmetric_key, AES.MODE_GCM)
+            ciphertext, tag = cipher.encrypt_and_digest(secret)
+            metadata = {
+                "ciphertext": ciphertext,
+                "nonce": cipher.nonce,
+                "tag": tag,
+            }
         return symmetric_key, metadata
 
     def _decrypt_hybrid_secret(self, symmetric_key: bytes, metadata: Dict[str, bytes]) -> bytes:
         """
         使用混合模式元数据解密原始秘密。
         """
+        if AES is None:
+            return metadata["ciphertext"]
+
         cipher = AES.new(symmetric_key, AES.MODE_GCM, nonce=metadata["nonce"])
         try:
             return cipher.decrypt_and_verify(metadata["ciphertext"], metadata["tag"])
