@@ -53,6 +53,15 @@ def _apply_log_axis_style(axis: plt.Axes) -> None:
     axis.yaxis.set_major_formatter(ticker.FuncFormatter(_format_power_of_ten))
 
 
+def _apply_axis_text_style(axis: plt.Axes, font_size: float | None) -> None:
+    if font_size is None:
+        return
+    axis.title.set_fontsize(font_size)
+    axis.xaxis.label.set_fontsize(font_size)
+    axis.yaxis.label.set_fontsize(font_size)
+    axis.tick_params(axis="both", labelsize=font_size)
+
+
 _setup_matplotlib_fonts()
 
 
@@ -138,6 +147,7 @@ def run_benchmark(
     rounds: int = 1,
     sizes: List[int] | None = None,
     seed: int = 1337,
+    font_size: float | None = None,
 ) -> Tuple[Dict[int, pd.DataFrame], Dict[int, pd.DataFrame]]:
     all_basic_dfs = {}
     all_feldman_dfs = {}
@@ -213,13 +223,13 @@ def run_benchmark(
         all_basic_dfs[prime_bits] = basic_df
         all_feldman_dfs[prime_bits] = feldman_df
 
-        _plot_task1(basic_df, prime_bits)
-        _plot_task2(feldman_df, prime_bits)
+        _plot_task1(basic_df, prime_bits, font_size=font_size)
+        _plot_task2(feldman_df, prime_bits, font_size=font_size)
 
     return all_basic_dfs, all_feldman_dfs
 
 
-def _plot_task1(df: pd.DataFrame, prime_bits: int) -> None:
+def _plot_task1(df: pd.DataFrame, prime_bits: int, font_size: float | None = None) -> None:
     colors = {"Our": "#1f77b4", "Naive": "#ff7f0e"}
     styles = {
         "Share/Split (ms)": ("o", "-"),
@@ -261,14 +271,18 @@ def _plot_task1(df: pd.DataFrame, prime_bits: int) -> None:
     axes[1].set_ylabel("Time (ms)")
     axes[1].grid(True, linestyle="--", alpha=0.4)
 
-    axes[0].legend()
-    axes[1].legend()
+    for ax in axes:
+        _apply_axis_text_style(ax, font_size)
+
+    legend_kwargs = {"fontsize": font_size - 10} if font_size is not None else {}
+    axes[0].legend(**legend_kwargs)
+    axes[1].legend(**legend_kwargs)
     fig.tight_layout()
     fig.savefig(f"shamir_{prime_bits}.png", bbox_inches="tight")
     plt.close(fig)
 
 
-def _plot_task2(df: pd.DataFrame, prime_bits: int) -> None:
+def _plot_task2(df: pd.DataFrame, prime_bits: int, font_size: float | None = None) -> None:
     colors = {"Our": "#1f77b4", "Naive": "#ff7f0e"}
     styles = {
         "Share+Commit (ms)": ("o", "-"),
@@ -311,8 +325,12 @@ def _plot_task2(df: pd.DataFrame, prime_bits: int) -> None:
     axes[1].set_ylabel("Time (ms)")
     axes[1].grid(True, linestyle="--", alpha=0.4)
 
-    axes[0].legend()
-    axes[1].legend()
+    for ax in axes:
+        _apply_axis_text_style(ax, font_size)
+
+    legend_kwargs = {"fontsize": font_size - 14} if font_size is not None else {}
+    axes[0].legend(**legend_kwargs)
+    axes[1].legend(**legend_kwargs)
     fig.tight_layout()
     fig.savefig(f"feldman_{prime_bits}.png", bbox_inches="tight")
     plt.close(fig)
@@ -320,7 +338,7 @@ def _plot_task2(df: pd.DataFrame, prime_bits: int) -> None:
 
 if __name__ == "__main__":
     prime_bits_list = [192, 256, 384, 512, 1024]
-    all_basic_dfs, all_feldman_dfs = run_benchmark(prime_bits_list=prime_bits_list)
+    all_basic_dfs, all_feldman_dfs = run_benchmark(prime_bits_list=prime_bits_list, font_size=24)
     for prime_bits in prime_bits_list:
         print(f"\nTask 1 — BasicShamir (prime_bits={prime_bits}) timings (ms):")
         print(all_basic_dfs[prime_bits].to_string(index=False))

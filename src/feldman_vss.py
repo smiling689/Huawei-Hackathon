@@ -259,7 +259,7 @@ class FeldmanVSS(BasicShamir):
 
         return lhs == rhs
 
-    # ------------------ 批处理验证（性能优化） ------------------
+    # ------------------ 批处理验证 ------------------
     def aggregate_batch_verify(self, shares: List[Tuple[int, int]], commitments: List[int], *, seed: int | None = None) -> bool:
         """
         使用**随机线性组合**的一次性聚合验证来批量检查多份份额。
@@ -322,7 +322,7 @@ class FeldmanVSS(BasicShamir):
         p, q = self.p, self.q
         t = len(commitments)
 
-        # ---- 修正：承诺值快速检查（允许 C_j == 1；仅排除不在 [1, p-1] 的值）----
+        # ---- 承诺值快速检查（允许 C_j == 1；仅排除不在 [1, p-1] 的值）----
         if any((cj <= 0) or (cj >= p) for cj in commitments):
             return [False] * len(shares)
 
