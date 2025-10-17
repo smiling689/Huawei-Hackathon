@@ -63,9 +63,9 @@ class BasicShamir:
                 raise ValueError("prime 必须为正整数")
             self.prime = prime
             self.prime_bits = prime.bit_length()
-            BasicSS._PRIME_CACHE[self.prime_bits] = self.prime
+            self._PRIME_CACHE[self.prime_bits] = self.prime
         else:
-            cached_prime = BasicSS._PRIME_CACHE.get(prime_bits)
+            cached_prime = self._PRIME_CACHE.get(prime_bits)
             if cached_prime is not None:
                 self.prime = cached_prime
             else:
@@ -76,7 +76,7 @@ class BasicShamir:
                     candidate |= 1 << (prime_bits - 1)
                     candidate |= 1
                     self.prime = nextprime(candidate)
-                BasicSS._PRIME_CACHE[prime_bits] = self.prime
+                self._PRIME_CACHE[prime_bits] = self.prime
             self.prime_bits = prime_bits
 
         # block_size 是秘密的最大字节长度，预留2字节用于长度前缀
