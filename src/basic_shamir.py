@@ -12,7 +12,7 @@ logic step by step.
 import secrets
 from itertools import combinations
 from typing import Dict, List, Optional, Tuple
-from sympy import mod_inverse, nextprime
+from sympy import mod_inverse, nextprime, prevprime
 
 # 优先使用 pycryptodome 库
 from Crypto.Util import number
@@ -21,6 +21,7 @@ from Crypto.Util import number
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
 
+import random
 
 class BasicShamir:
     """
@@ -76,7 +77,13 @@ class BasicShamir:
             if cached_prime is not None:
                 self.prime = cached_prime
             else:
-                self.prime = number.getPrime(prime_bits)
+                cur_prime = 1 << prime_bits
+                epoch = random.randint(1, 10)
+                for i in range(epoch):
+                    cur_prime = prevprime(cur_prime)
+                self.prime = cur_prime
+                # self.prime = prevprime(1 << prime_bits)
+                # self.prime = number.getPrime(prime_bits)
                 self._PRIME_CACHE[prime_bits] = self.prime
             self.prime_bits = prime_bits
 
@@ -197,18 +204,13 @@ class BasicShamir:
             raise ValueError("Invalid parameters, 需要满足 2 ≤ t ≤ n ≤ 255")
 
         # 构造随机多项式：常数项为秘密，其余系数均随机生成。
+        prime = self.prime
         encoded_secret = self._encode_secret(secret)
-        coeffs = [encoded_secret]
-        # 生成 t-1 个随机系数
-        for _ in range(t - 1):
-            # randbelow 生成 [0, prime) 范围内的随机整数
-            coeffs.append(secrets.randbelow(self.prime))
+        coeffs = [encoded_secret] + [secrets.randbelow(prime) for _ in range(t - 1)]
 
-        shares = []
-        for i in range(1, n + 1):
-            share_value = self._eval_polynomial(coeffs, i)
-            shares.append((i, share_value))
-        return shares
+        # 利用局部变量避免属性查找 + 列表推导
+        eval_poly = self._eval_polynomial
+        return [(i, eval_poly(coeffs, i)) for i in range(1, n + 1)]
 
     def _split_secret_hybrid(self, secret: bytes, n: int, t: int) -> List[Tuple[int, int]]:
         """
@@ -290,7 +292,7 @@ class BasicShamir:
             >>> shamir.recover_secret([(1, 10), (2, 20)])
         """
         if len(shares) < 2:
-            raise ValueError("Need at least 2 share")
+            raise ValueError("Need at least 2 shares")
 
         if shares[0][0] > 0:
             return self._recover_secret_standard(shares)
