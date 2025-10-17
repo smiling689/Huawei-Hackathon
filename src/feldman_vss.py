@@ -12,6 +12,14 @@ verifiable sharing logic.
 from typing import Dict, List, Tuple
 from .basic_shamir import BasicShamir
 
+import secrets
+import time
+from typing import Dict, List, Tuple
+
+from sympy import isprime, nextprime
+
+from Crypto.Util import number
+
 
 class FeldmanVSS(BasicShamir):
     """
@@ -23,7 +31,8 @@ class FeldmanVSS(BasicShamir):
     complaint handling so the sharing process is publicly verifiable.
     """
 
-    def __init__(self, bits: int = 2048):
+    # def __init__(self, bits: int = 2048):
+    def __init__(self, bits: int = 256):
         """
         初始化 Feldman VSS 系统。
         Initialize the Feldman VSS system.
@@ -52,10 +61,31 @@ class FeldmanVSS(BasicShamir):
         Example:
             >>> vss = FeldmanVSS(bits=256)
         """
-        super().__init__(prime_bits=bits - 1)
-        self.p = None
-        self.q = None
-        self.g = None
+        if bits < 32:
+            raise ValueError("bits 参数过小，无法保证安全性")
+
+        self.p, self.q, self.g = self._generate_safe_prime_parameters(bits)
+
+        # 以 q 作为有限域素数，复用 BasicSS 的运算能力。
+        super().__init__(prime=self.q)
+
+    @staticmethod
+    def _generate_safe_prime_parameters(bits: int) -> Tuple[int, int, int]:
+        """
+        生成安全素数 p = 2q + 1 以及一个阶为 q 的生成元 g。
+        """
+        candidate_q = number.getPrime(bits - 2)
+        # candidate_q = nextprime(1 << (bits - 2))
+        while True:
+            p = 2 * candidate_q + 1
+            if isprime(p):
+                for _ in range(10):
+                    h = secrets.randbelow(p - 3) + 2  # 避免平凡元素
+                    g = pow(h, 2, p)
+                    if g != 1 and pow(g, candidate_q, p) == 1:
+                        return p, candidate_q, g
+            # candidate_q = nextprime(candidate_q + 2)
+            candidate_q = number.getPrime(bits - 2)
 
     def share_with_commitments(self, secret: bytes, n: int, t: int) -> Tuple[List[Tuple[int, int]], List[int]]:
         """
@@ -101,7 +131,21 @@ class FeldmanVSS(BasicShamir):
         Example:
             >>> shares, commitments = FeldmanVSS().share_with_commitments(b"demo", 5, 3)
         """
-        return [], []
+        if not (2 <= t <= n <= 255):
+            raise ValueError("需要满足 2 ≤ t ≤ n ≤ 255")
+
+        encoded_secret = self._encode_secret(secret)
+        coeffs = [encoded_secret]
+        for _ in range(t - 1):
+            coeffs.append(secrets.randbelow(self.prime))
+
+        shares = []
+        for i in range(1, n + 1):
+            share_value = self._eval_polynomial(coeffs, i)
+            shares.append((i, share_value))
+
+        commitments = [pow(self.g, coeff % self.q, self.p) for coeff in coeffs]
+        return shares, commitments
 
     def verify_share(self, share_id: int, share_value: int, commitments: List[int]) -> bool:
         """
@@ -134,7 +178,14 @@ class FeldmanVSS(BasicShamir):
         Example:
             >>> FeldmanVSS().verify_share(1, 123, [1, 2, 3])
         """
-        return False
+        lhs = pow(self.g, share_value, self.p)
+
+        rhs = 1
+        for j, commitment in enumerate(commitments):
+            exponent = pow(share_id, j, self.q)
+            rhs = (rhs * pow(commitment, exponent, self.p)) % self.p
+
+        return lhs == rhs
 
     def batch_verification(self, shares: List[Tuple[int, int]], commitments: List[int]) -> List[bool]:
         """
@@ -165,7 +216,19 @@ class FeldmanVSS(BasicShamir):
         Example:
             >>> FeldmanVSS().batch_verification([(1, 123)], [1, 2])
         """
-        return [False for _ in shares]
+        results = []
+        for share_id, share_value in shares:
+            powers = [1]
+            for j in range(1, len(commitments)):
+                powers.append((powers[-1] * share_id) % self.q)
+
+            rhs = 1
+            for power, commitment in zip(powers, commitments):
+                rhs = (rhs * pow(commitment, power, self.p)) % self.p
+
+            lhs = pow(self.g, share_value, self.p)
+            results.append(lhs == rhs)
+        return results
 
     def generate_complaint(self, share_id: int, share_value: int, commitments: List[int]) -> Dict:
         """
@@ -232,7 +295,25 @@ class FeldmanVSS(BasicShamir):
             >>> complaint["expected_verification"]["left"] != complaint["expected_verification"]["right"]
             True # If the share verifies, a ValueError("Cannot generate complaint") is raised.
         """
-        return {}
+        if self.verify_share(share_id, share_value, commitments):
+            raise ValueError("份额验证通过，不应生成投诉")
+
+        expected_rhs = 1
+        powers = [pow(share_id, j, self.q) for j in range(len(commitments))]
+        for power, commitment in zip(powers, commitments):
+            expected_rhs = (expected_rhs * pow(commitment, power, self.p)) % self.p
+
+        return {
+            "accuser": share_id,
+            "invalid_share": share_value,
+            "evidence": {
+                "lhs": pow(self.g, share_value, self.p),
+                "rhs": expected_rhs,
+                "powers": powers,
+            },
+            "commitments": commitments,
+            "timestamp": time.time(),
+        }
 
     def recover_secret_from_shares(self, shares: List[Tuple[int, int]], commitments: List[int]) -> bytes:
         """
@@ -270,4 +351,8 @@ class FeldmanVSS(BasicShamir):
         Example:
             >>> FeldmanVSS().recover_secret_from_shares([(1, 10), (2, 20)], [1, 2, 3])
         """
-        return b""
+        verification = self.batch_verification(shares, commitments)
+        if not all(verification):
+            raise ValueError("存在无效份额，拒绝恢复秘密")
+        return self.recover_secret(shares)
+
