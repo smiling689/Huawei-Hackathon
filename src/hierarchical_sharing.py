@@ -103,8 +103,8 @@ class HierarchicalSecretSharing:
         """
         self.organization = organization or self.DEFAULT_ORGANIZATION.copy()
         self.vss = FeldmanVSS(bits=vss_bits)
-        self.proactive = ProactiveSecretSharing(refresh_interval=refresh_interval,
-                                                prime=self.vss.q if getattr(self.vss, "q", None) else None)
+        self.proactive = ProactiveSecretSharing(vss=self.vss,
+                                                refresh_interval=refresh_interval)
         self.commitments: Dict[str, Any] = {
             "master": None,
             "regional": {},
@@ -118,9 +118,8 @@ class HierarchicalSecretSharing:
         # VSS 提供可验证性；Proactive 提供周期性刷新能力
         self.vss = FeldmanVSS(bits=vss_bits)
         self.proactive = ProactiveSecretSharing(
+            vss = self.vss,
             refresh_interval=refresh_interval,
-            prime_bits=self.vss.prime.bit_length(),
-            prime=self.vss.prime,
         )
 
         self.master_key_info: Optional[Dict] = None
@@ -185,6 +184,7 @@ class HierarchicalSecretSharing:
         异常:
             ValueError: 当 VSS 参数非法或密钥过长时，
                 错误信息需包含 "Invalid parameters" 或 "Secret too large"。
+                TODO 不确定
         Raises:
             ValueError: If underlying VSS parameter or secret checks fail ("Invalid parameters" /
                 "Secret too large").
@@ -310,7 +310,7 @@ class HierarchicalSecretSharing:
         """
         region_info = self.organization.get("regions", {}).get(region)
         if region_info is None:
-            raise ValueError(f"未知区域: {region}")
+            raise ValueError(f"Invalid region: {region}")
 
         branch_count = int(region_info.get("branches", 0))
         if branch_count <= 0:
@@ -444,7 +444,7 @@ class HierarchicalSecretSharing:
             >>> HierarchicalSecretSharing().create_branch_key(b"BRANCH", ["a", "b", "c"])
         """
         if len(branches) < 3:
-            raise ValueError("分行业务密钥至少需要 3 个参与分行")
+            raise ValueError("Need at least 3 branches to create a branch key")
 
         n = len(branches)
         threshold = 3
@@ -543,7 +543,7 @@ class HierarchicalSecretSharing:
 
             for share in shares:
                 if share.level != "master":
-                    raise ValueError("份额级别与目标密钥不匹配")
+                    raise ValueError("Invalid share level, 份额级别与目标密钥不匹配")
                 if share.id in meta["hq_ids"]:
                     hq_count += 1
                 elif share.id in meta["region_ids"].values():
@@ -596,7 +596,7 @@ class HierarchicalSecretSharing:
 
             for share in shares:
                 if share.level != "regional":
-                    raise ValueError("Security violation: share level mismatch")
+                    raise ValueError("Invalid share level, Security violation: share level mismatch")
                 if self.regional_share_map.get(share.id) != region_name:
                     raise ValueError("Security violation: incorrect regional share")
                 if share.id in meta["center_ids"]:
@@ -638,7 +638,7 @@ class HierarchicalSecretSharing:
             share_tuples = []
             for share in shares:
                 if share.level != "branch":
-                    raise ValueError("Security violation: share level mismatch")
+                    raise ValueError("Invalid share level, Security violation: share level mismatch")
                 if self.branch_share_map.get(share.id) != key_id:
                     raise ValueError("Security violation: incorrect branch share")
                 if not self.verify_share(share, "branch"):
