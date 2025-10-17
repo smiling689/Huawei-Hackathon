@@ -14,8 +14,12 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any
 
-from feldman_vss import FeldmanVSS
-from proactive_sharing import ProactiveSecretSharing
+try:
+    from .feldman_vss import FeldmanVSS
+    from .proactive_sharing import ProactiveSecretSharing
+except ImportError:  # pragma: no cover
+    from feldman_vss import FeldmanVSS  # type: ignore
+    from proactive_sharing import ProactiveSecretSharing  # type: ignore
 
 
 @dataclass

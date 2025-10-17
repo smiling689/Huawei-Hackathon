@@ -16,8 +16,8 @@ sys.path.append(".")
 
 from src.basic_shamir import BasicShamir as FastBasicShamir  # noqa: E402
 from src.feldman_vss import FeldmanVSS as FastFeldmanVSS  # noqa: E402
-from src.basic_task1 import BasicShamir as SlowBasicShamir  # noqa: E402
-from src.basic_task2 import FeldmanVSS as SlowFeldmanVSS  # noqa: E402
+from basic_task1 import BasicShamir as SlowBasicShamir  # noqa: E402
+from basic_task2 import FeldmanVSS as SlowFeldmanVSS  # noqa: E402
 
 
 def _setup_matplotlib_fonts() -> None:
