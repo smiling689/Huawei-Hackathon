@@ -111,7 +111,7 @@ class BasicShamir:
             本方法专为 32KB 等大密钥场景优化的实现。
         """
         if not (2 <= t <= n <= 255):
-            raise ValueError("Invalid parameters, 需要满足 2 ≤ t ≤ n ≤ 255")
+            raise ValueError("Invalid parameters: need 2 ≤ t ≤ n ≤ 255")
 
         if len(secret) == 0:
             # 空密钥的边界情况：仍返回 n 份空 payload。
@@ -119,7 +119,7 @@ class BasicShamir:
 
         # 最多 32KB（bonus 要求）
         if len(secret) > 32768:
-            raise ValueError("Secret too large, 超出 32KB 上限（bonus 目标）")
+            raise ValueError("Secret too large: 超出 32KB 上限（bonus 目标）")
 
         # 初始化每个参与者的缓冲区。
         buffers = [bytearray() for _ in range(n)]
@@ -218,7 +218,7 @@ class BasicShamir:
     def _encode_secret(self, secret: bytes) -> int:
         # 将秘密字节串转换为整数，并附加2字节长度前缀用于精确恢复。
         if len(secret) > self.block_size:
-            raise ValueError(f"Secret too large, secret is too long, longer than {self.block_size} bytes")
+            raise ValueError(f"Secret too large: secret exceeds {self.block_size} bytes")
 
         secret_int = int.from_bytes(secret, "big") if secret else 0
         # 多留16位用于存储长度信息
@@ -262,7 +262,10 @@ class BasicShamir:
                     continue
                 numerator = (numerator * (-x_j)) % self.prime
                 denominator = (denominator * (x_i - x_j)) % self.prime
-            inv = mod_inverse(denominator % self.prime, self.prime)
+            try:
+                inv = mod_inverse(denominator % self.prime, self.prime)
+            except ValueError as exc:
+                raise ValueError("Modular inverse does not exist") from exc
             secret = (secret + y_i * numerator * inv) % self.prime
         return secret
     
@@ -312,7 +315,7 @@ class BasicShamir:
             >>> shares = shamir.split_secret(b"demo", n=5, t=3)
         """
         if not (2 <= t <= n <= 255):
-            raise ValueError("Invalid parameters, 需要满足 2 ≤ t ≤ n ≤ 255")
+            raise ValueError("Invalid parameters: need 2 ≤ t ≤ n ≤ 255")
 
         # 构造随机多项式：常数项为秘密，其余系数均随机生成。
         encoded_secret = self._encode_secret(secret)
@@ -367,7 +370,7 @@ class BasicShamir:
             >>> shamir.recover_secret([(1, 10), (2, 20)])
         """
         if len(shares) < 2:
-            raise ValueError("Need at least 2 shares")
+            raise ValueError("Need at least 2 shares to recover the secret")
 
         # 每个份额编号必须唯一，否则插值会出现重复点。
         ids = [share_id for share_id, _ in shares]

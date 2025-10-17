@@ -185,6 +185,7 @@ class HierarchicalSecretSharing:
         异常:
             ValueError: 当 VSS 参数非法或密钥过长时，
                 错误信息需包含 "Invalid parameters" 或 "Secret too large"。
+                TODO 不确定
         Raises:
             ValueError: If underlying VSS parameter or secret checks fail ("Invalid parameters" /
                 "Secret too large").
@@ -310,7 +311,7 @@ class HierarchicalSecretSharing:
         """
         region_info = self.organization.get("regions", {}).get(region)
         if region_info is None:
-            raise ValueError(f"未知区域: {region}")
+            raise ValueError(f"Invalid region: {region}")
 
         branch_count = int(region_info.get("branches", 0))
         if branch_count <= 0:
@@ -444,7 +445,7 @@ class HierarchicalSecretSharing:
             >>> HierarchicalSecretSharing().create_branch_key(b"BRANCH", ["a", "b", "c"])
         """
         if len(branches) < 3:
-            raise ValueError("分行业务密钥至少需要 3 个参与分行")
+            raise ValueError("Need at least 3 branches to create a branch key")
 
         n = len(branches)
         threshold = 3

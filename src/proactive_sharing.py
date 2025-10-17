@@ -135,12 +135,15 @@ class ProactiveSecretSharing:
         Example:
             >>> ProactiveSecretSharing().active_refresh([(1, 10), (2, 20)], 2, 2)
         """
-        if not old_shares:
-            raise ValueError("old_shares 不能为空")
-        if n != len(old_shares):
-            raise ValueError("n 必须与旧份额数量一致")
+        actual_n = len(old_shares)
+        if actual_n == 0:
+            raise ValueError("Need at least one share to refresh")
+        if actual_n < t:
+            raise ValueError(f"Need at least {t} shares for refresh")
+        if n != actual_n:
+            raise ValueError("Invalid parameters: n must match share count")
         if not (2 <= t <= n):
-            raise ValueError("需要满足 2 ≤ t ≤ n")
+            raise ValueError("Invalid parameters: need 2 ≤ t ≤ n")
 
         # 检查份额编号唯一性，并初始化增量累加器。
         share_ids = [share_id for share_id, _ in old_shares]
@@ -207,12 +210,15 @@ class ProactiveSecretSharing:
         Example:
             >>> ProactiveSecretSharing().active_refresh_with_coeffs([(1, 10)], 1, 1)
         """
-        if not old_shares:
-            raise ValueError("old_shares 不能为空")
-        if n != len(old_shares):
-            raise ValueError("n 必须与旧份额数量一致")
+        actual_n = len(old_shares)
+        if actual_n == 0:
+            raise ValueError("Need at least one share to refresh")
+        if actual_n < t:
+            raise ValueError(f"Need at least {t} shares for refresh")
+        if n != actual_n:
+            raise ValueError("Invalid parameters: n must match share count")
         if not (2 <= t <= n):
-            raise ValueError("需要满足 2 ≤ t ≤ n")
+            raise ValueError("Invalid parameters: need 2 ≤ t ≤ n")
 
         share_ids = [share_id for share_id, _ in old_shares]
         if len(set(share_ids)) != len(share_ids):
@@ -317,9 +323,9 @@ class ProactiveSecretSharing:
             >>> ProactiveSecretSharing().generate_refresh_polynomial(1, 5, 3)
         """
         if not (1 <= participant_id <= n):
-            raise ValueError("参与者编号超出范围")
+            raise ValueError("Invalid participant identifier")
         if not (2 <= t <= n):
-            raise ValueError("参数需满足 2 ≤ t ≤ n")
+            raise ValueError("Invalid parameters: need 2 ≤ t ≤ n")
 
         coefficients = self._generate_zero_polynomial(t)
         contributions = []
