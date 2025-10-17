@@ -19,21 +19,16 @@ except Exception:  # pragma: no cover
 
 import secrets
 import time
-from sympy import isprime, nextprime
+import random
+from sympy import isprime, nextprime, prevprime
 
 try:
     from Crypto.Util import number  # type: ignore
 except ImportError:
     number = None
 
-try:
-    from Crypto.Cipher import AES  # type: ignore
-    from Crypto.Random import get_random_bytes  # type: ignore
-except ImportError:
-    AES = None
-
-    def get_random_bytes(length: int) -> bytes:
-        return secrets.token_bytes(length)
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
 
 
 class FeldmanVSS(BasicShamir):
@@ -88,10 +83,10 @@ class FeldmanVSS(BasicShamir):
         """
         生成安全素数 p = 2q + 1 以及一个阶为 q 的生成元 g。
         """
-        if number is not None:
-            candidate_q = number.getPrime(bits - 2)
-        else:
-            candidate_q = nextprime(1 << (bits - 2))
+        candidate_q = 1 << (bits - 1)
+        epoch = random.randint(1, 10)
+        for i in range(epoch):
+            candidate_q = prevprime(candidate_q)
         while True:
             p = 2 * candidate_q + 1
             # if miller_rabin_isprime(p):
@@ -101,10 +96,7 @@ class FeldmanVSS(BasicShamir):
                     g = pow(h, 2, p)
                     if g != 1 and pow(g, candidate_q, p) == 1:
                         return p, candidate_q, g
-            if number is not None:
-                candidate_q = number.getPrime(bits - 2)
-            else:
-                candidate_q = nextprime(candidate_q + 2)
+            candidate_q = prevprime(candidate_q)
 
     def _commitment_key(self, commitments: List[int]) -> Tuple[int, ...]:
         """
@@ -143,25 +135,19 @@ class FeldmanVSS(BasicShamir):
 
         key_size = self._select_hybrid_key_size()
         symmetric_key = get_random_bytes(key_size)
-        if AES is None:
-            metadata = {"ciphertext": secret, "nonce": b"", "tag": b""}
-        else:
-            cipher = AES.new(symmetric_key, AES.MODE_GCM)
-            ciphertext, tag = cipher.encrypt_and_digest(secret)
-            metadata = {
-                "ciphertext": ciphertext,
-                "nonce": cipher.nonce,
-                "tag": tag,
-            }
+        cipher = AES.new(symmetric_key, AES.MODE_GCM)
+        ciphertext, tag = cipher.encrypt_and_digest(secret)
+        metadata = {
+            "ciphertext": ciphertext,
+            "nonce": cipher.nonce,
+            "tag": tag,
+        }
         return symmetric_key, metadata
 
     def _decrypt_hybrid_secret(self, symmetric_key: bytes, metadata: Dict[str, bytes]) -> bytes:
         """
         使用混合模式元数据解密原始秘密。
         """
-        if AES is None:
-            return metadata["ciphertext"]
-
         cipher = AES.new(symmetric_key, AES.MODE_GCM, nonce=metadata["nonce"])
         try:
             return cipher.decrypt_and_verify(metadata["ciphertext"], metadata["tag"])
