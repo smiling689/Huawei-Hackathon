@@ -235,8 +235,8 @@ class BasicShamir:
             >>> shamir = BasicShamir()
             >>> shamir.recover_secret([(1, 10), (2, 20)])
         """
-        if len(shares) == 0:
-            raise ValueError("至少需要提供一个份额")
+        if len(shares) < 2:
+            raise ValueError("Need at least 2 shares")
 
         # 每个份额编号必须唯一，否则插值会出现重复点。
         ids = [share_id for share_id, _ in shares]
