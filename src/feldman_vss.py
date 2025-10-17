@@ -18,7 +18,10 @@ from typing import Dict, List, Tuple
 
 from sympy import isprime, nextprime
 
-from Crypto.Util import number
+try:
+    from Crypto.Util import number  # type: ignore
+except ImportError:
+    number = None
 
 
 class FeldmanVSS(BasicShamir):
@@ -74,8 +77,10 @@ class FeldmanVSS(BasicShamir):
         """
         生成安全素数 p = 2q + 1 以及一个阶为 q 的生成元 g。
         """
-        candidate_q = number.getPrime(bits - 2)
-        # candidate_q = nextprime(1 << (bits - 2))
+        if number is not None:
+            candidate_q = number.getPrime(bits - 2)
+        else:
+            candidate_q = nextprime(1 << (bits - 2))
         while True:
             p = 2 * candidate_q + 1
             if isprime(p):
@@ -84,8 +89,10 @@ class FeldmanVSS(BasicShamir):
                     g = pow(h, 2, p)
                     if g != 1 and pow(g, candidate_q, p) == 1:
                         return p, candidate_q, g
-            # candidate_q = nextprime(candidate_q + 2)
-            candidate_q = number.getPrime(bits - 2)
+            if number is not None:
+                candidate_q = number.getPrime(bits - 2)
+            else:
+                candidate_q = nextprime(candidate_q + 2)
 
     def share_with_commitments(self, secret: bytes, n: int, t: int) -> Tuple[List[Tuple[int, int]], List[int]]:
         """
@@ -303,12 +310,13 @@ class FeldmanVSS(BasicShamir):
         for power, commitment in zip(powers, commitments):
             expected_rhs = (expected_rhs * pow(commitment, power, self.p)) % self.p
 
+        left = pow(self.g, share_value, self.p)
         return {
             "accuser": share_id,
             "invalid_share": share_value,
-            "evidence": {
-                "lhs": pow(self.g, share_value, self.p),
-                "rhs": expected_rhs,
+            "expected_verification": {
+                "left": left,
+                "right": expected_rhs,
                 "powers": powers,
             },
             "commitments": commitments,
