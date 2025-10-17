@@ -13,7 +13,11 @@ import secrets
 from itertools import combinations
 from typing import Dict, List, Optional, Tuple
 from sympy import mod_inverse, nextprime
-from Crypto.Util import number
+
+try:
+    from Crypto.Util import number  # type: ignore
+except ImportError:
+    number = None
 
 class BasicShamir:
     """
