@@ -14,10 +14,13 @@ from itertools import combinations
 from typing import Dict, List, Optional, Tuple
 from sympy import mod_inverse, nextprime
 
-try:
-    from Crypto.Util import number  # type: ignore
-except ImportError:
-    number = None
+# 优先使用 pycryptodome 库
+from Crypto.Util import number
+
+# 导入 AES 加密相关的模块
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
+
 
 class BasicShamir:
     """
@@ -73,156 +76,20 @@ class BasicShamir:
             if cached_prime is not None:
                 self.prime = cached_prime
             else:
-                if number is not None:
-                    self.prime = number.getPrime(prime_bits)
-                else:
-                    candidate = secrets.randbits(prime_bits - 1)
-                    candidate |= 1 << (prime_bits - 1)
-                    candidate |= 1
-                    self.prime = nextprime(candidate)
+                self.prime = number.getPrime(prime_bits)
                 self._PRIME_CACHE[prime_bits] = self.prime
             self.prime_bits = prime_bits
 
-        # block_size 是秘密的最大字节长度，预留2字节用于长度前缀
-        # 例如，256位素数允许的最大秘密长度为 (256-16)/8 = 30 字节
-        # 这样可以确保编码后的秘密不会超过有限域的范围
+        # block_size 是直接被Shamir算法处理的秘密的最大字节长度
         self.block_size = (self.prime_bits - 16) // 8
-        # 为批量块编码准备：每个份额值占用的固定字节数（便于拼接/切分）。
-        self.value_bytes = (self.prime_bits + 7) // 8
 
-    # ---------------------- 大密钥（最高 32KB）支持 ----------------------
-    def split_secret_large(self, secret: bytes, n: int, t: int) -> list[tuple[int, bytes]]:
-        """
-        将 *大密钥*（长度可达 32KB）拆分为份额。
-
-        设计要点（性能&兼容性）：
-        - 不改变基础 API 的行为；当需要处理超出 block_size 的密钥时，
-          使用本方法以 *流式分块* 方式处理。
-        - 将密钥按 ``self.block_size`` 分块；每个分块独立生成一套多项式系数，
-          以密块作为常数项。这样能在保证安全性的同时让每份份额只需追加一个
-          固定长度（``value_bytes``）的片段。
-        - 每位参与者的份额用 ``bytes`` 打包：按顺序拼接所有块的 y 值，
-          每个 y 值占 ``value_bytes`` 字节（big-endian）。
-
-        返回值：列表 ``[(share_id, packed_bytes), ...]``，其中 ``packed_bytes``
-        为该参与者在所有块上的 y 值串联。
-
-        注：若密钥本身未超过 ``block_size``，仍建议使用原始 ``split_secret``；
-            本方法专为 32KB 等大密钥场景优化的实现。
-        """
-        if not (2 <= t <= n <= 255):
-            raise ValueError("Invalid parameters: need 2 ≤ t ≤ n ≤ 255")
-
-        if len(secret) == 0:
-            # 空密钥的边界情况：仍返回 n 份空 payload。
-            return [(i, b"") for i in range(1, n + 1)]
-
-        # 最多 32KB（bonus 要求）
-        if len(secret) > 32768:
-            raise ValueError("Secret too large: 超出 32KB 上限（bonus 目标）")
-
-        # 初始化每个参与者的缓冲区。
-        buffers = [bytearray() for _ in range(n)]
-
-        # 使用内存视图逐块处理，避免不必要的拷贝。
-        mv = memoryview(secret)
-        block_size = self.block_size
-        val_len = self.value_bytes
-
-        offset = 0
-        while offset < len(secret):
-            # 极小概率：编码整数可能 >= prime；则对当前块做“动态缩减 1 字节重试”
-            size = min(block_size, len(secret) - offset)
-            while True:
-                block = bytes(mv[offset: offset + size])
-                try:
-                    encoded = self._encode_secret(block)
-                    break
-                except ValueError as e:
-                    if "too large to encode" in str(e) and size > 0:
-                        size -= 1
-                        continue
-                    raise
-
-            # 生成 t-1 个随机系数（常数项为 encoded）
-            coeffs = [encoded]
-            for _ in range(t - 1):
-                coeffs.append(secrets.randbelow(self.prime))
-
-            # 为 i=1..n 评估多项式并追加到缓冲区
-            for i in range(1, n + 1):
-                y = self._eval_polynomial(coeffs, i)
-                buffers[i - 1] += int.to_bytes(y, length=val_len, byteorder="big", signed=False)
-
-            offset += size
-
-        # 打包输出：每位参与者一个 bytes。
-        return [(i + 1, bytes(buf)) for i, buf in enumerate(buffers)]
-
-    def recover_secret_large(self, shares: list[tuple[int, bytes]], t: int) -> bytes:
-        """
-        从 *大密钥* 份额恢复原文。
-
-        参数
-        ----
-        shares : 形如 ``[(share_id, packed_bytes), ...]`` 的列表；
-                 ``packed_bytes`` 是该参与者在每个分块上的 y 值串联，
-                 每个 y 值占 ``self.value_bytes`` 字节。
-        t      : 阈值。
-
-        返回
-        ----
-        bytes : 恢复的原始密钥。
-        """
-        if t < 2 or len(shares) < t:
-            raise ValueError("Need at least t shares for recovery (large-secret)")
-
-        # 检查：所有份额长度一致，且能被 value_bytes 整除
-        val_len = self.value_bytes
-        lengths = [len(p) for _, p in shares]
-        if len(set(lengths)) != 1:
-            raise ValueError("份额打包长度不一致，无法恢复（large-secret）")
-        if lengths[0] % val_len != 0:
-            raise ValueError("份额内容长度不是 value_bytes 的整数倍（large-secret）")
-
-        num_blocks = lengths[0] // val_len
-
-        # 选取前 t 份 *编号互异* 的份额作为插值输入
-        uniq = {}
-        for sid, payload in shares:
-            if sid not in uniq:
-                uniq[sid] = payload
-            if len(uniq) == t:
-                break
-        if len(uniq) < t:
-            raise ValueError("需要至少 t 份且编号互异的份额（large-secret）")
-
-        # 将选中的 t 份份额解包为 t 条 y 序列
-        selected = sorted(uniq.items(), key=lambda x: x[0])
-        y_lists = []
-        for _, packed in selected:
-            ys = [int.from_bytes(packed[i * val_len:(i + 1) * val_len], "big") for i in range(num_blocks)]
-            y_lists.append(ys)
-
-        # 逐块插值并解码
-        out = bytearray()
-        share_ids = [sid for sid, _ in selected]
-        for k in range(num_blocks):
-            shares_k = [(sid, y_lists[idx][k]) for idx, sid in enumerate(share_ids)]
-            const = self._lagrange_interpolate_zero(shares_k)
-            out += self._decode_secret(const)
-
-        return bytes(out)
-
-    # ---------------------- 基础功能（小密钥） ----------------------
     def _encode_secret(self, secret: bytes) -> int:
-        # 将秘密字节串转换为整数，并附加2字节长度前缀用于精确恢复。
-        if len(secret) > self.block_size:
-            raise ValueError(f"Secret too large: secret exceeds {self.block_size} bytes")
-
+        # 这个内部方法现在只在标准模式下被调用，此时 len(secret) <= self.block_size
+        # 因此不再需要复杂的标志位检查
         secret_int = int.from_bytes(secret, "big") if secret else 0
         # 多留16位用于存储长度信息
         encoded = (secret_int << 16) | len(secret)
+        # 理论上 encoded 应该总是小于 prime，但双重检查更安全
         if encoded >= self.prime:
             raise ValueError("Secret too large, secret is too large to encode in the chosen prime field")
         return encoded
@@ -231,6 +98,7 @@ class BasicShamir:
         # 使用长度前缀拆出原始秘密，长度信息保存在低16位。
         length = value & 0xFFFF
         secret_int = value >> 16
+        # 使用原始分享时的 block_size 进行长度限制，防止解码出过长的数据
         length = min(length, self.block_size)
 
         # 将整数转换为字节串，并按长度指示进行截断或补零。
@@ -263,12 +131,12 @@ class BasicShamir:
                 numerator = (numerator * (-x_j)) % self.prime
                 denominator = (denominator * (x_i - x_j)) % self.prime
             try:
-                inv = mod_inverse(denominator % self.prime, self.prime)
-            except ValueError as exc:
-                raise ValueError("Modular inverse does not exist") from exc
+                inv = mod_inverse(denominator, self.prime)
+            except Exception:
+                raise ValueError("Modular inverse does not exist")
             secret = (secret + y_i * numerator * inv) % self.prime
         return secret
-    
+
     def split_secret(self, secret: bytes, n: int, t: int) -> List[Tuple[int, int]]:
         """
         将秘密分割成份额列表。
@@ -314,8 +182,19 @@ class BasicShamir:
             >>> shamir = BasicShamir()
             >>> shares = shamir.split_secret(b"demo", n=5, t=3)
         """
+        if len(secret) <= self.block_size:
+            return self._split_secret_standard(secret, n, t)
+        elif len(secret) >= 1024:
+            return self._split_secret_hybrid(secret, n, t)
+        else:
+            raise ValueError("Secret too large")
+
+    def _split_secret_standard(self, secret: bytes, n: int, t: int) -> List[Tuple[int, int]]:
+        """
+        标准的 Shamir 分割逻辑，仅用于处理小于等于 block_size 的秘密。
+        """
         if not (2 <= t <= n <= 255):
-            raise ValueError("Invalid parameters: need 2 ≤ t ≤ n ≤ 255")
+            raise ValueError("Invalid parameters, 需要满足 2 ≤ t ≤ n ≤ 255")
 
         # 构造随机多项式：常数项为秘密，其余系数均随机生成。
         encoded_secret = self._encode_secret(secret)
@@ -330,6 +209,47 @@ class BasicShamir:
             share_value = self._eval_polynomial(coeffs, i)
             shares.append((i, share_value))
         return shares
+
+    def _split_secret_hybrid(self, secret: bytes, n: int, t: int) -> List[Tuple[int, int]]:
+        """
+        处理大秘密的混合加密分割逻辑。
+        """
+        # [修复] 动态选择最合适的AES密钥大小，确保它能被当前 block_size 处理
+        key_size = 0
+        if self.block_size >= 32:
+            key_size = 32  # 足够容纳AES-256
+        elif self.block_size >= 24:
+            key_size = 24  # 退而求其次，使用AES-192
+        elif self.block_size >= 16:
+            key_size = 16  # 最后选择，使用AES-128
+        else:
+            raise ValueError(
+                f"prime_bits ({self.prime_bits}) 太小，无法处理大秘密。 "
+                f"其 block_size 为 {self.block_size} 字节，但混合加密至少需要16字节。"
+            )
+
+        # 1. 生成一个动态大小的、一次性的AES密钥
+        symmetric_key = get_random_bytes(key_size)
+
+        # 2. 使用AES-GCM模式加密大秘密
+        cipher = AES.new(symmetric_key, AES.MODE_GCM)
+        ciphertext, tag = cipher.encrypt_and_digest(secret)
+        nonce = cipher.nonce
+
+        # 3. [关键修复] 使用 *当前实例* 和其 *正确的prime* 来分割短的AES密钥
+        # 因为 symmetric_key 的长度 (key_size) <= self.block_size，
+        # 这个调用会安全地进入 _split_secret_standard。
+        key_shares = self._split_secret_standard(symmetric_key, n, t)
+
+        # 4. 将加密数据打包成特殊的“元数据份额”
+        meta_shares = [
+            (-1, len(ciphertext)),
+            (-2, len(nonce)),
+            (-3, len(tag)),
+            (-4, int.from_bytes(ciphertext + nonce + tag, 'big'))
+        ]
+
+        return meta_shares + key_shares
 
     def recover_secret(self, shares: List[Tuple[int, int]]) -> bytes:
         """
@@ -369,8 +289,17 @@ class BasicShamir:
             >>> shamir = BasicShamir()
             >>> shamir.recover_secret([(1, 10), (2, 20)])
         """
+        if not shares:
+            raise ValueError("Need at least 1 share")
+
+        if shares[0][0] > 0:
+            return self._recover_secret_standard(shares)
+        else:
+            return self._recover_secret_hybrid(shares)
+
+    def _recover_secret_standard(self, shares: List[Tuple[int, int]]) -> bytes:
         if len(shares) < 2:
-            raise ValueError("Need at least 2 shares to recover the secret")
+            raise ValueError("Need at least 2 shares")
 
         # 每个份额编号必须唯一，否则插值会出现重复点。
         ids = [share_id for share_id, _ in shares]
@@ -379,6 +308,40 @@ class BasicShamir:
 
         secret_int = self._lagrange_interpolate_zero(shares)
         return self._decode_secret(secret_int)
+
+    def _recover_secret_hybrid(self, shares: List[Tuple[int, int]]) -> bytes:
+        """
+        混合加密的恢复逻辑。
+        """
+        if len(shares) < 4 or not all(s[0] < 0 for s in shares[:4]):
+            raise ValueError("混合模式恢复时，需要提供完整的元数据份额。")
+
+        meta_map = dict(shares[:4])
+        ciphertext_len = meta_map[-1]
+        nonce_len = meta_map[-2]
+        tag_len = meta_map[-3]
+        blob_int = meta_map[-4]
+
+        total_len = ciphertext_len + nonce_len + tag_len
+        blob_bytes = blob_int.to_bytes((blob_int.bit_length() + 7) // 8, 'big')
+        if len(blob_bytes) < total_len:
+            blob_bytes = b'\x00' * (total_len - len(blob_bytes)) + blob_bytes
+
+        ciphertext = blob_bytes[:ciphertext_len]
+        nonce = blob_bytes[ciphertext_len: ciphertext_len + nonce_len]
+        tag = blob_bytes[ciphertext_len + nonce_len:]
+
+        # 提取真正的密钥份额
+        key_shares_subset = shares[4:]
+        # [关键修复] 调用 _recover_secret_standard 来恢复AES密钥
+        recovered_symmetric_key = self._recover_secret_standard(key_shares_subset)
+
+        cipher = AES.new(recovered_symmetric_key, AES.MODE_GCM, nonce=nonce)
+        try:
+            decrypted_secret = cipher.decrypt_and_verify(ciphertext, tag)
+            return decrypted_secret
+        except ValueError:
+            raise ValueError("解密失败：数据可能已被篡改或密钥份额错误。")
 
     def verify_shares_consistency(self, shares: List[Tuple[int, int]], t: int) -> bool:
         """
@@ -415,7 +378,8 @@ class BasicShamir:
         """
         if t < 2 or len(shares) < t:
             return False
-
+        if shares and shares[0][0] < 0:
+            return False
         combo_iter = combinations(shares, t)
         try:
             first_subset = next(combo_iter)
@@ -439,3 +403,55 @@ class BasicShamir:
     def get_cached_prime(cls, bits: int) -> Optional[int]:
         """返回指定位数的缓存素数（如存在）。"""
         return cls._PRIME_CACHE.get(bits)
+
+# ### 测试代码 ###
+# if __name__ == "__main__":
+#     # --- 场景一：测试小秘密（应使用标准模式） ---
+#     print("====== 场景一：测试标准 Shamir 模式 (小秘密) ======")
+#     shamir_std = BasicShamir(prime_bits=256)
+#     small_secret = b"This is a small secret."
+#     n, t = 5, 3
+
+#     std_shares = shamir_std.split_secret(small_secret, n, t)
+#     recovered_small_secret = shamir_std.recover_secret([std_shares[0], std_shares[2], std_shares[4]])
+
+#     assert small_secret == recovered_small_secret
+#     print("✅ 标准模式恢复成功！\n")
+
+#     # --- 场景二：测试32KB大秘密，使用 prime_bits=256 ---
+#     # 此时 block_size=30，无法容纳32字节的AES-256密钥，应自动降级使用24字节的AES-192密钥。
+#     print("====== 场景二：测试混合加密模式 (prime_bits=256, 32KB Secret) ======")
+#     shamir_hybrid = BasicShamir(prime_bits=256)
+#     large_secret = get_random_bytes(32 * 1024)
+
+#     print(f"原始大秘密长度: {len(large_secret)} 字节")
+#     print(f"使用的 block_size: {shamir_hybrid.block_size} 字节")
+
+#     hybrid_shares = shamir_hybrid.split_secret(large_secret, n, t)
+
+#     # 验证内部使用的AES密钥长度是否符合预期（24字节）
+#     # 我们通过恢复密钥并检查其长度来间接验证
+#     key_shares_only = hybrid_shares[4:]
+#     recovered_key = shamir_hybrid.recover_secret(key_shares_only)
+#     print(f"混合加密内部使用的AES密钥长度为: {len(recovered_key)} 字节 (预期为24)")
+#     assert len(recovered_key) == 24
+
+#     # 恢复时，需要提供元数据份额 + 至少t个密钥份额
+#     shares_for_recovery_hybrid = hybrid_shares[:4] + [hybrid_shares[4], hybrid_shares[6], hybrid_shares[8]]
+#     recovered_large_secret = shamir_hybrid.recover_secret(shares_for_recovery_hybrid)
+
+#     assert large_secret == recovered_large_secret
+#     print(f"恢复的大秘密长度: {len(recovered_large_secret)} 字节")
+#     print("✅ 混合加密模式恢复成功！错误已修复。\n")
+
+#     # --- 场景三：测试必须使用AES-256密钥的场景 ---
+#     # 需要初始化时指定更大的 prime_bits
+#     print("====== 场景三：测试必须使用AES-256的混合加密 (prime_bits=272) ======")
+#     shamir_aes256 = BasicShamir(prime_bits=272) # block_size = 32
+#     print(f"使用的 block_size: {shamir_aes256.block_size} 字节")
+
+#     shares3 = shamir_aes256.split_secret(large_secret, n, t)
+#     recovered_key3 = shamir_aes256.recover_secret(shares3[4:])
+#     print(f"混合加密内部使用的AES密钥长度为: {len(recovered_key3)} 字节 (预期为32)")
+#     assert len(recovered_key3) == 32
+#     print("✅ 确认能根据更大的 block_size 选择更强的AES密钥。")

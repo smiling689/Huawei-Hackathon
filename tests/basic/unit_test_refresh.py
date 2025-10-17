@@ -7,25 +7,31 @@
 import sys
 import os
 import time
+from functools import lru_cache
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from src.basic_shamir import BasicShamir
+from src.feldman_vss import FeldmanVSS
 from src.proactive_sharing import ProactiveSecretSharing
+
+
+@lru_cache(maxsize=None)
+def create_vss(bits: int = 256) -> FeldmanVSS:
+    return FeldmanVSS(bits=bits)
 
 
 def test_refresh_consistency():
     secret = b"Refresh_Test_2024"
     n, t = 5, 3
 
-    shamir = BasicShamir(prime_bits=256)
-    proactive = ProactiveSecretSharing(refresh_interval=3600)
+    vss = create_vss()
+    proactive = ProactiveSecretSharing(vss=vss, refresh_interval=3600)
 
-    initial_shares = shamir.split_secret(secret, n, t)
+    initial_shares = vss.split_secret(secret, n, t)
     refreshed_shares = proactive.active_refresh(initial_shares, n, t)
 
-    assert shamir.recover_secret(initial_shares[:t]) == secret
-    assert shamir.recover_secret(refreshed_shares[:t]) == secret
+    assert vss.recover_secret(initial_shares[:t]) == secret
+    assert vss.recover_secret(refreshed_shares[:t]) == secret
     print("PASS - active_refresh 前后恢复一致 (active_refresh preserves recovery result)")
     return True
 
@@ -34,15 +40,15 @@ def test_shares_changed():
     secret = b"Share_Change_Test"
     n, t = 4, 2
 
-    shamir = BasicShamir(prime_bits=256)
-    proactive = ProactiveSecretSharing(refresh_interval=1)
+    vss = create_vss()
+    proactive = ProactiveSecretSharing(vss=vss, refresh_interval=1)
 
-    initial_shares = shamir.split_secret(secret, n, t)
+    initial_shares = vss.split_secret(secret, n, t)
     refreshed_shares = proactive.active_refresh(initial_shares, n, t)
 
     changed = any(before[1] != after[1] for before, after in zip(initial_shares, refreshed_shares))
     assert changed
-    assert shamir.recover_secret(refreshed_shares[:t]) == secret
+    assert vss.recover_secret(refreshed_shares[:t]) == secret
     print("PASS - active_refresh 更新了份额值 (active_refresh updates share values)")
     return True
 
@@ -52,13 +58,13 @@ def test_multiple_refresh():
     n, t = 5, 3
     refresh_times = 3
 
-    shamir = BasicShamir(prime_bits=256)
-    proactive = ProactiveSecretSharing(refresh_interval=1)
-    shares = shamir.split_secret(secret, n, t)
+    vss = create_vss()
+    proactive = ProactiveSecretSharing(vss=vss, refresh_interval=1)
+    shares = vss.split_secret(secret, n, t)
 
     for _ in range(refresh_times):
         shares = proactive.active_refresh(shares, n, t)
-        assert shamir.recover_secret(shares[:t]) == secret
+        assert vss.recover_secret(shares[:t]) == secret
 
     print("PASS - 多次 active_refresh 仍然保持正确恢复 (Repeated active_refresh maintains correct recovery)")
     return True
@@ -68,20 +74,21 @@ def test_active_refresh_with_coeffs():
     secret = b"WITH_COEFFS"
     n, t = 5, 3
 
-    shamir = BasicShamir(prime_bits=256)
-    proactive = ProactiveSecretSharing(refresh_interval=1)
-    initial_shares = shamir.split_secret(secret, n, t)
+    vss = create_vss()
+    proactive = ProactiveSecretSharing(vss=vss, refresh_interval=1)
+    initial_shares = vss.split_secret(secret, n, t)
 
     refreshed_shares, coeffs = proactive.active_refresh_with_coeffs(initial_shares, n, t)
     assert len(coeffs) == t
     assert coeffs[0] == 0
-    assert shamir.recover_secret(refreshed_shares[:t]) == secret
+    assert vss.recover_secret(refreshed_shares[:t]) == secret
     print("PASS - active_refresh_with_coeffs 返回刷新系数并保持正确恢复 (active_refresh_with_coeffs returns coefficients and preserves recovery)")
     return True
 
 
 def test_schedule_and_generate_polynomial():
-    proactive = ProactiveSecretSharing(refresh_interval=10)
+    vss = create_vss()
+    proactive = ProactiveSecretSharing(vss=vss, refresh_interval=10)
     assert not proactive.schedule_automatic_refresh()
 
     proactive.last_refresh_time -= 20
@@ -90,28 +97,18 @@ def test_schedule_and_generate_polynomial():
     payload = proactive.generate_refresh_polynomial(participant_id=1, n=4, t=3)
     coeffs = payload["polynomial"]
     shares = payload["shares"]
+    commitments = payload["commitments"]
 
     assert coeffs[0] == 0
     assert len(coeffs) == 3
     assert len(shares) == 3  # participant doesn't send to itself
+    assert payload["participant_id"] == 1
+    assert payload["epoch"] == proactive.epoch
 
-    for receiver_id, value in shares:
-        accum = 0
-        x = 1
-        for coeff in coeffs:
-            accum = (accum + coeff * x) % proactive.prime
-            x = (x * receiver_id) % proactive.prime
-        assert accum == value
-
-    if payload["commitments"]:
+    if commitments:
+        assert len(commitments) == len(coeffs)
         for receiver_id, value in shares:
-            left = pow(proactive.g, value, proactive.p)
-            right = 1
-            power = 1
-            for commitment in payload["commitments"]:
-                right = (right * pow(commitment, power, proactive.p)) % proactive.p
-                power = (power * receiver_id) % proactive.p
-            assert left == right
+            assert vss.verify_share(receiver_id, value, commitments)
 
     print("PASS - schedule_automatic_refresh 与 generate_refresh_polynomial 正常 (schedule_automatic_refresh and generate_refresh_polynomial behave correctly)")
     return True
