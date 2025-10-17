@@ -9,7 +9,7 @@ periodic refresh and polynomial generation logic described by the public API.
 """
 
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 
 class ProactiveSecretSharing:
@@ -22,18 +22,18 @@ class ProactiveSecretSharing:
     keep commitments in sync.
     """
 
-    def __init__(self, refresh_interval: int = 30 * 24 * 3600,
-                 prime_bits: int = 256,
-                 prime: Optional[int] = None):
+    def __init__(self, vss, refresh_interval: int = 30 * 24 * 3600):
         """
         初始化主动秘密分享系统。
         Initialize the proactive secret-sharing system.
 
         参数:
+            vss: FeldmanVSS 实例，用于生成承诺与共享群参数。
             refresh_interval: 刷新周期（秒），默认 30 天。
             prime_bits: 若需要自行生成素数时的位数。
             prime: 可选的外部素数，用于与 VSS 共享有限域。
         Args:
+            vss: FeldmanVSS instance providing commitments and group parameters.
             refresh_interval: Refresh interval in seconds (30 days by default).
             prime_bits: Bit-length for generating a prime when necessary.
             prime: Optional external prime to align with the VSS field.
@@ -45,23 +45,32 @@ class ProactiveSecretSharing:
 
         实现要求:
             - 记录刷新周期、最后刷新时间与当前 epoch；
-            - 若提供 prime 参数需与主题方案共享同一有限域；
+            - 绑定 Feldman VSS 的群参数（p、q、g）；
+            - 校验 `vss` 参数（缺失时抛出 `ValueError`）；
             - 为刷新调度提供基础元数据。
         Implementation Requirements:
             - Store refresh interval, last refresh timestamp, and current epoch.
-            - If `prime` is supplied, reuse it to stay in the same field as VSS.
+            - Attach the Feldman VSS group parameters (p, q, g).
+            - Validate the `vss` argument (raise `ValueError` when missing).
             - Provide metadata needed for refresh scheduling.
 
         示例:
-            >>> pss = ProactiveSecretSharing(refresh_interval=10)
+            >>> pss = ProactiveSecretSharing(vss, refresh_interval=10)
         Example:
-            >>> pss = ProactiveSecretSharing(refresh_interval=10)
+            >>> pss = ProactiveSecretSharing(vss, refresh_interval=10)
         """
+        if vss is None:
+            raise ValueError("FeldmanVSS instance is required")
+
         self.refresh_interval = refresh_interval
-        self.prime_bits = prime_bits
-        self.prime = prime
+        # self.prime_bits = prime_bits
         self.last_refresh_time = time.time()
         self.epoch = 0
+        self.last_refresh_time = time.time()
+        self.vss = vss
+        self.prime = getattr(vss, "q", None)
+        self.g = getattr(vss, "g", None)
+        self.p = getattr(vss, "p", None)
 
     def active_refresh(self, old_shares: List[Tuple[int, int]], n: int, t: int) -> List[Tuple[int, int]]:
         """
@@ -97,9 +106,9 @@ class ProactiveSecretSharing:
             ValueError: If fewer than t shares are supplied (message contains "Need at least").
 
         示例:
-            >>> ProactiveSecretSharing().active_refresh([(1, 10), (2, 20)], 2, 2)
+            >>> ProactiveSecretSharing(vss).active_refresh([(1, 10), (2, 20)], 2, 2)
         Example:
-            >>> ProactiveSecretSharing().active_refresh([(1, 10), (2, 20)], 2, 2)
+            >>> ProactiveSecretSharing(vss).active_refresh([(1, 10), (2, 20)], 2, 2)
         """
         return []
 
@@ -124,10 +133,12 @@ class ProactiveSecretSharing:
 
         实现要求:
             - 与 `active_refresh` 逻辑一致；
-            - 提供刷新多项式系数以便上层更新承诺。
+            - 提供刷新多项式系数以便上层更新承诺；
+            - 缓存刷新系数供 `generate_refresh_polynomial` 使用。
         Implementation Requirements:
             - Follow the same logic as `active_refresh`.
             - Expose polynomial coefficients for commitment updates.
+            - Store coefficients for later use in `generate_refresh_polynomial`.
 
         异常:
             ValueError: 份额数量小于阈值（信息包含 "Need at least"）。
@@ -135,9 +146,9 @@ class ProactiveSecretSharing:
             ValueError: If provided shares are fewer than t ("Need at least").
 
         示例:
-            >>> ProactiveSecretSharing().active_refresh_with_coeffs([(1, 10)], 1, 1)
+            >>> ProactiveSecretSharing(vss).active_refresh_with_coeffs([(1, 10)], 1, 1)
         Example:
-            >>> ProactiveSecretSharing().active_refresh_with_coeffs([(1, 10)], 1, 1)
+            >>> ProactiveSecretSharing(vss).active_refresh_with_coeffs([(1, 10)], 1, 1)
         """
         return [], []
 
@@ -159,9 +170,9 @@ class ProactiveSecretSharing:
             - Update internal timing when a refresh is triggered.
 
         示例:
-            >>> ProactiveSecretSharing().schedule_automatic_refresh()
+            >>> ProactiveSecretSharing(vss).schedule_automatic_refresh()
         Example:
-            >>> ProactiveSecretSharing().schedule_automatic_refresh()
+            >>> ProactiveSecretSharing(vss).schedule_automatic_refresh()
         """
         return False
 
@@ -183,31 +194,43 @@ class ProactiveSecretSharing:
             刷新数据字典，例如::
 
                 {
+                    "participant_id": int,
                     "polynomial": [0, a1, a2, ...],
                     "shares": [(id, value), ...],
+                    "commitments": [C0, C1, ...],
                     "epoch": int
                 }
         Returns:
             Dictionary such as::
 
                 {
+                    "participant_id": int,
                     "polynomial": [0, a1, a2, ...],
                     "shares": [(id, value), ...],
+                    "commitments": [C0, C1, ...],
                     "epoch": int
                 }
 
         实现要求:
             - 多项式常数项固定为 0；
             - 为所有参与者计算 δ_i(j)；
+            - 使用 `vss.compute_commitments` 生成承诺列表；
             - 记录生成时的 epoch 信息。
         Implementation Requirements:
             - Keep the polynomial constant term at 0.
             - Compute δ_i(j) values for every participant.
+            - Generate commitments via `vss.compute_commitments`.
             - Record epoch information when generating data.
 
         示例:
-            >>> ProactiveSecretSharing().generate_refresh_polynomial(1, 5, 3)
+            >>> ProactiveSecretSharing(vss).generate_refresh_polynomial(1, 5, 3)
         Example:
-            >>> ProactiveSecretSharing().generate_refresh_polynomial(1, 5, 3)
+            >>> ProactiveSecretSharing(vss).generate_refresh_polynomial(1, 5, 3)
         """
-        return {}
+        return {
+            "participant_id": participant_id,
+            "polynomial": [],
+            "shares": [],
+            "commitments": [],
+            "epoch": self.epoch,
+        }

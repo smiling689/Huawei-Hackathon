@@ -247,59 +247,75 @@ class FeldmanVSS(BasicShamir):
 
     def batch_verification(self, shares: List[Tuple[int, int]], commitments: List[int]) -> List[bool]:
         """
-                批量验证多份份额。
-        Verify multiple shares in a batch.
-
-        参数:
-            shares: 待验证的份额列表。
-            commitments: 承诺值列表。
-        Args:
-            shares: List of shares to check.
-            commitments: List of commitments.
-
-        返回:
-            布尔值列表，对应每个份额的验证结果。
-        Returns:
-            List of booleans for each share's verification result.
-
-        实现要求:
-            - 通过幂次缓存等技巧减少重复计算；
-            - 对无法验证的份额返回 False。
-        Implementation Requirements:
-            - Use power caching or similar optimizations to reduce exponentiation.
-            - Return False for any share that fails verification.
-
-        示例:
-            >>> FeldmanVSS().batch_verification([(1, 123)], [1, 2])
-        Example:
-            >>> FeldmanVSS().batch_verification([(1, 123)], [1, 2])
-        批量验证多份份额（快慢结合）：
-        1) 先聚合一次性验证（全部通过则直接全 True）；
-        2) 若聚合失败，再逐份精确验证定位坏份额。
+        批量验证多份份额（优化版：幂次迭代生成+Cj的2的幂次预处理+逐份精确验证）。
+        核心：用二进制分解优化模幂运算，无线性组合，每个份额独立验证。
         """
-        if not shares:
-            return []
-
-        # 快路径：大批量时先跑聚合
-        try:
-            if len(shares) >= 4 and self.aggregate_batch_verify(shares, commitments):
-                return [True] * len(shares)
-        except Exception:
-            pass  # 聚合异常不影响正确性
-
-        # 逐份精确验证
         results = []
+        if not shares or not commitments:
+            return [False] * len(shares)
+
+        # 1. 提取公共参数（避免重复访问属性）
+        g = self.g
+        p = self.p  # 大素数（Cj 和 g 的模）
+        q = self.q  # 有限域素数（i^j 和 s_i 的模）
+        t = len(commitments)  # 承诺值数量 = 多项式系数个数（0~t-1次）
+        max_exponent_bits = q.bit_length()  # i^j < q，二进制位数不超过 q 的位数（最大3072位，按安全参数）
+
+        # 2. 预处理：对每个 Cj，预计算 Cj^(2^0), Cj^(2^1), ..., Cj^(2^max_exponent_bits) mod p
+        # 目的：后续计算 Cj^e 时，通过二进制分解 e 复用预处理结果，减少模幂次数
+        cj_pow2_cache = []
+        for cj in commitments:
+            # 检查 Cj 合法性（避免平凡值，确保是有效承诺）
+            if cj <= 1 or cj >= p - 1:
+                return [False] * len(shares)  # 无效承诺值，所有份额均无效
+
+            # 预计算 Cj 的 2^k 次幂（k从0到max_exponent_bits）
+            pow2_list = [1] * (max_exponent_bits + 1)
+            pow2_list[0] = cj  # Cj^(2^0) = Cj^1 = Cj
+            for k in range(1, max_exponent_bits + 1):
+                # 递推：Cj^(2^k) = (Cj^(2^(k-1)))^2 mod p
+                pow2_list[k] = pow(pow2_list[k-1], 2, p)
+            cj_pow2_cache.append(pow2_list)
+
+        # 3. 逐份验证（幂次迭代+预处理幂次复用）
         for share_id, share_value in shares:
-            powers = [1]
-            for j in range(1, len(commitments)):
-                powers.append((powers[-1] * share_id) % self.q)
+            # 3.1 基础合法性检查（提前过滤无效份额）
+            if (share_id <= 0 or share_id >= p) or (share_value < 0 or share_value >= q):
+                results.append(False)
+                continue
 
+            # 3.2 迭代生成 share_id 的 0~t-1 次幂（i^0, i^1, ..., i^(t-1)）mod q
+            i_powers = [1] * t  # i^0 = 1（任何数的0次幂为1）
+            for j in range(1, t):
+                # 递推：i^j = i^(j-1) * i mod q（避免重复 pow 计算）
+                i_powers[j] = (i_powers[j-1] * share_id) % q
+
+            # 3.3 计算验证等式右侧：∏(Cj^i^j) mod p（复用 Cj 的 2的幂次预处理结果）
             rhs = 1
-            for power, commitment in zip(powers, commitments):
-                rhs = (rhs * pow(commitment, power, self.p)) % self.p
+            for j in range(t):
+                e = i_powers[j]  # 当前指数：e = i^j
+                cj_pow2 = cj_pow2_cache[j]  # 当前 Cj 的 2的幂次列表
 
-            lhs = pow(self.g, share_value, self.p)
+                # 二进制分解 e：e = b0*2^0 + b1*2^1 + ... + bk*2^k（bi ∈ {0,1}）
+                # Cj^e = Cj^(b0*2^0) * Cj^(b1*2^1) * ... * Cj^(bk*2^k) = ∏(cj_pow2[k] if bk=1 else 1)
+                term = 1
+                temp_e = e
+                bit_idx = 0
+                while temp_e > 0:
+                    if temp_e & 1:  # 若当前位为1，乘上对应的 Cj^(2^bit_idx)
+                        term = (term * cj_pow2[bit_idx]) % p
+                    temp_e >>= 1  # 右移一位，处理下一个二进制位
+                    bit_idx += 1
+
+                # 累积当前 Cj^e 到右侧结果
+                rhs = (rhs * term) % p
+
+            # 3.4 计算验证等式左侧：g^share_value mod p（直接模幂，g 固定无需预处理）
+            lhs = pow(g, share_value, p)
+
+            # 3.5 验证等式：左侧 == 右侧？
             results.append(lhs == rhs)
+
         return results
 
     # ------------------ 投诉与恢复 ------------------

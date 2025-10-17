@@ -103,8 +103,8 @@ class HierarchicalSecretSharing:
         """
         self.organization = organization or self.DEFAULT_ORGANIZATION.copy()
         self.vss = FeldmanVSS(bits=vss_bits)
-        self.proactive = ProactiveSecretSharing(refresh_interval=refresh_interval,
-                                                prime=self.vss.q if getattr(self.vss, "q", None) else None)
+        self.proactive = ProactiveSecretSharing(vss=self.vss,
+                                                refresh_interval=refresh_interval)
         self.commitments: Dict[str, Any] = {
             "master": None,
             "regional": {},
@@ -118,9 +118,8 @@ class HierarchicalSecretSharing:
         # VSS 提供可验证性；Proactive 提供周期性刷新能力
         self.vss = FeldmanVSS(bits=vss_bits)
         self.proactive = ProactiveSecretSharing(
+            vss = self.vss,
             refresh_interval=refresh_interval,
-            prime_bits=self.vss.prime.bit_length(),
-            prime=self.vss.prime,
         )
 
         self.master_key_info: Optional[Dict] = None
