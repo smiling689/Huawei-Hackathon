@@ -193,10 +193,12 @@ class HierarchicalSecretSharing:
         if len(self.region_names) < 5:
             raise ValueError("组织结构必须包含5个区域")
 
+        prefixed_secret = b"[MASTER]" + secret
+
         total_shares = 8
         threshold = 6
         shares_raw, commitments = self.vss.share_with_commitments(
-            secret, total_shares, threshold
+            prefixed_secret, total_shares, threshold
         )
 
         secret_len = len(secret)
@@ -322,8 +324,10 @@ class HierarchicalSecretSharing:
         total_shares = center_share_count + branch_count
         threshold = center_share_count + branch_support_required
 
+        prefixed_secret = f"[REGIONAL:{region.upper()}]".encode() + secret
+
         shares_raw, commitments = self.vss.share_with_commitments(
-            secret, total_shares, threshold
+            prefixed_secret, total_shares, threshold
         )
 
         secret_len = len(secret)
@@ -440,7 +444,8 @@ class HierarchicalSecretSharing:
 
         n = len(branches)
         threshold = 3
-        shares_raw, commitments = self.vss.share_with_commitments(secret, n, threshold)
+        prefixed_secret = b"[BRANCH]" + secret
+        shares_raw, commitments = self.vss.share_with_commitments(prefixed_secret, n, threshold)
         secret_len = len(secret)
 
         key_id = f"branch_key_{len(self.branch_keys) + 1}"
@@ -548,16 +553,109 @@ class HierarchicalSecretSharing:
                 share_tuples.append((share.id, share.value))
 
             if hq_count < len(meta["hq_ids"]):
-                raise ValueError("HQ 份额不足")
+                raise ValueError("Insufficient shares: missing HQ contributions")
             if len(regional_included) < 3:
-                raise ValueError("区域份额不足，至少需要 3 个")
+                raise ValueError("Insufficient shares: need at least 3 regional centers")
             if len(share_tuples) < meta["threshold"]:
-                raise ValueError("份额数量未达到阈值")
+                raise ValueError("Insufficient shares: threshold not met")
 
-            secret = self.vss.recover_secret_from_shares(
+            secret_with_prefix = self.vss.recover_secret_from_shares(
                 share_tuples, meta["commitments"]
             )
-            return secret
+            if not secret_with_prefix.startswith(b"[MASTER]"):
+                raise ValueError("Security violation detected for master recovery")
+            return secret_with_prefix[len(b"[MASTER]") :]
+
+        if level == "regional":
+            if not shares:
+                raise ValueError("需要提供至少一个份额")
+
+            region_candidates = set()
+            for share in shares:
+                mapped = self.regional_share_map.get(share.id)
+                if mapped:
+                    region_candidates.add(mapped)
+            if len(region_candidates) == 0:
+                # 尝试从 holder 推断
+                holders = {share.holder.split("_", 1)[0] for share in shares if share.holder}
+                region_candidates = {holder for holder in holders if holder in self.regional_keys}
+            if len(region_candidates) != 1:
+                raise ValueError("Security violation: ambiguous regional shares")
+            region_name = next(iter(region_candidates))
+
+            meta = self.regional_keys.get(region_name)
+            if meta is None:
+                raise ValueError("区域密钥尚未生成")
+
+            share_tuples: List[Tuple[int, int]] = []
+            center_present: set = set()
+            branch_present = 0
+
+            for share in shares:
+                if share.level != "regional":
+                    raise ValueError("Security violation: share level mismatch")
+                if self.regional_share_map.get(share.id) != region_name:
+                    raise ValueError("Security violation: incorrect regional share")
+                if share.id in meta["center_ids"]:
+                    center_present.add(share.id)
+                elif share.id in meta["branch_ids"]:
+                    branch_present += 1
+                else:
+                    raise ValueError("Security violation: unknown regional share id")
+                if not self.verify_share(share, "regional", region=region_name):
+                    raise ValueError("份额验证失败")
+                share_tuples.append((share.id, share.value))
+
+            if len(center_present) < len(meta["center_ids"]):
+                raise ValueError("Insufficient shares: missing regional center contributions")
+            if branch_present < meta["branch_support_required"]:
+                raise ValueError("Insufficient shares: branch participation below 60%")
+            if len(share_tuples) < meta["threshold"]:
+                raise ValueError("Insufficient shares: threshold not met")
+
+            secret_with_prefix = self.vss.recover_secret_from_shares(
+                share_tuples, meta["commitments"]
+            )
+            expected_prefix = f"[REGIONAL:{region_name.upper()}]".encode()
+            if not secret_with_prefix.startswith(expected_prefix):
+                raise ValueError("Security violation detected for regional recovery")
+            return secret_with_prefix[len(expected_prefix) :]
+
+        if level == "branch":
+            key_id_candidates = set()
+            for share in shares:
+                mapped = self.branch_share_map.get(share.id)
+                if mapped:
+                    key_id_candidates.add(mapped)
+            if len(key_id_candidates) != 1:
+                raise ValueError("Security violation: ambiguous branch shares")
+            key_id = next(iter(key_id_candidates))
+
+            meta = self.branch_keys.get(key_id)
+            if meta is None:
+                raise ValueError("分行密钥尚未生成")
+
+            share_tuples = []
+            for share in shares:
+                if share.level != "branch":
+                    raise ValueError("Security violation: share level mismatch")
+                if self.branch_share_map.get(share.id) != key_id:
+                    raise ValueError("Security violation: incorrect branch share")
+                if not self.verify_share(share, "branch"):
+                    raise ValueError("份额验证失败")
+                share_tuples.append((share.id, share.value))
+
+            if len(share_tuples) < meta["threshold"]:
+                raise ValueError("Insufficient shares: need at least 3 branch shares")
+
+            secret_with_prefix = self.vss.recover_secret_from_shares(
+                share_tuples, meta["commitments"]
+            )
+            if not secret_with_prefix.startswith(b"[BRANCH]"):
+                raise ValueError("Security violation detected for branch recovery")
+            return secret_with_prefix[len(b"[BRANCH]") :]
+
+        raise ValueError("Security violation: unknown recovery level")
 
 
     def verify_share(self, share: Share, level: str, region: Optional[str] = None) -> bool:
@@ -682,9 +780,12 @@ class HierarchicalSecretSharing:
             if self.master_key_info is None:
                 raise ValueError("主密钥尚未生成")
             meta = self.master_key_info
-            secret = self.vss.recover_secret_from_shares(
+            secret_prefixed = self.vss.recover_secret_from_shares(
                 [(s.id, s.value) for s in old_shares], meta["commitments"]
             )
+            if not secret_prefixed.startswith(b"[MASTER]"):
+                raise ValueError("Security violation detected during master refresh")
+            secret = secret_prefixed[len(b"[MASTER]") :]
             new_structure = self.create_master_key(secret)
             holder_map = {
                 share.holder: share
@@ -706,9 +807,13 @@ class HierarchicalSecretSharing:
             meta = self.regional_keys.get(region)
             if meta is None:
                 raise ValueError("区域密钥尚未生成")
-            secret = self.vss.recover_secret_from_shares(
+            secret_prefixed = self.vss.recover_secret_from_shares(
                 [(s.id, s.value) for s in old_shares], meta["commitments"]
             )
+            expected_prefix = f"[REGIONAL:{region.upper()}]".encode()
+            if not secret_prefixed.startswith(expected_prefix):
+                raise ValueError("Security violation detected during regional refresh")
+            secret = secret_prefixed[len(expected_prefix) :]
             new_structure = self.create_regional_key(secret, region)
             holder_map = {
                 share.holder: share
@@ -735,9 +840,12 @@ class HierarchicalSecretSharing:
             meta = self.branch_keys.get(key_id)
             if meta is None:
                 raise ValueError("分行密钥尚未生成")
-            secret = self.vss.recover_secret_from_shares(
+            secret_prefixed = self.vss.recover_secret_from_shares(
                 [(s.id, s.value) for s in old_shares], meta["commitments"]
             )
+            if not secret_prefixed.startswith(b"[BRANCH]"):
+                raise ValueError("Security violation detected during branch refresh")
+            secret = secret_prefixed[len(b"[BRANCH]") :]
             # 移除旧映射
             for old_id in list(meta["share_ids"]):
                 self.branch_share_map.pop(old_id, None)
