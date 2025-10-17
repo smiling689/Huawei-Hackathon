@@ -7,6 +7,17 @@ BasicShamir template implementation.
 Participants can copy this file to `src/basic_shamir.py` and, following the
 published interface description, implement the core Shamir secret-sharing
 logic step by step.
+
+【基础实现】需保证待处理的秘密长度不超过 `block_size`，若超出应抛出
+`ValueError`（信息包含 "Secret too large"）。【扩展实现】需支持超长秘密，
+并满足子问题 1～4，可根据设计调整或新增接口；若完成扩展，请在演示与答辩
+材料中说明，我们将以扩展测试脚本作为参考。
+
+[Base implementation] Ensure the secret length never exceeds `block_size`; if it
+does, raise `ValueError` (message containing "Secret too large"). [Extended
+implementation] Add support for oversized secrets and satisfy subproblems 1–4.
+Feel free to refine or extend the interfaces, and highlight the design in your
+demo and presentation; we will reference extended tests accordingly.
 """
 
 from typing import List, Tuple

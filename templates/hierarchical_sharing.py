@@ -101,8 +101,8 @@ class HierarchicalSecretSharing:
         """
         self.organization = organization or self.DEFAULT_ORGANIZATION.copy()
         self.vss = FeldmanVSS(bits=vss_bits)
-        self.proactive = ProactiveSecretSharing(refresh_interval=refresh_interval,
-                                                prime=self.vss.q if getattr(self.vss, "q", None) else None)
+        self.proactive = ProactiveSecretSharing(vss=self.vss,
+                                                refresh_interval=refresh_interval)
         self.commitments: Dict[str, List[int]] = {}
         self.audit_logs: List[Dict] = []
         self.active_keys: Dict[str, Dict] = {}
