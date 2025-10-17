@@ -87,13 +87,13 @@ class BasicShamir:
     def _encode_secret(self, secret: bytes) -> int:
         # 将秘密字节串转换为整数，并附加2字节长度前缀用于精确恢复。
         if len(secret) > self.block_size:
-            raise ValueError(f"secret is too long, longer than {self.block_size} bytes")
+            raise ValueError(f"Secret too large, secret is too long, longer than {self.block_size} bytes")
 
         secret_int = int.from_bytes(secret, "big") if secret else 0
         # 多留16位用于存储长度信息
         encoded = (secret_int << 16) | len(secret)
         if encoded >= self.prime:
-            raise ValueError("secret is too large to encode in the chosen prime field")
+            raise ValueError("Secret too large, secret is too large to encode in the chosen prime field")
         return encoded
 
     def _decode_secret(self, value: int) -> bytes:
@@ -181,7 +181,7 @@ class BasicShamir:
             >>> shares = shamir.split_secret(b"demo", n=5, t=3)
         """
         if not (2 <= t <= n <= 255):
-            raise ValueError("需要满足 2 ≤ t ≤ n ≤ 255")
+            raise ValueError("Invalid parameters, 需要满足 2 ≤ t ≤ n ≤ 255")
 
         # 构造随机多项式：常数项为秘密，其余系数均随机生成。
         encoded_secret = self._encode_secret(secret)
