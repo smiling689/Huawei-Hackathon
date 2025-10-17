@@ -31,7 +31,7 @@ def assert_false(condition, msg: str):
 
 def generate_valid_test_data(vss: FeldmanVSS, n: int, t: int) -> Tuple[List[Tuple[int, int]], List[int], bytes]:
     """生成合法测试数据：有效份额+对应承诺+原始秘密"""
-    secret = secrets.token_bytes(13)  # 随机16字节秘密（模拟真实场景）
+    secret = secrets.token_bytes(20)  # 随机16字节秘密（模拟真实场景）
     shares, commitments = vss.share_with_commitments(secret, n, t)
     return shares, commitments, secret
 
@@ -194,7 +194,7 @@ def main():
 
     # 初始化FeldmanVSS实例（bits=128，平衡速度与安全性）
     try:
-        vss = FeldmanVSS(bits=128)
+        vss = FeldmanVSS(bits=256)
         print(f"\n✅ VSS实例初始化成功（p={vss.p}, q={vss.q}, g={vss.g}）")
     except Exception as e:
         print(f"\n❌ VSS实例初始化失败：{str(e)}")
