@@ -132,7 +132,7 @@ class FeldmanVSS(BasicShamir):
             >>> shares, commitments = FeldmanVSS().share_with_commitments(b"demo", 5, 3)
         """
         if not (2 <= t <= n <= 255):
-            raise ValueError("需要满足 2 ≤ t ≤ n ≤ 255")
+            raise ValueError("Invalid parameters: 需要满足 2 ≤ t ≤ n ≤ 255")
 
         encoded_secret = self._encode_secret(secret)
         coeffs = [encoded_secret]
@@ -296,7 +296,7 @@ class FeldmanVSS(BasicShamir):
             True # If the share verifies, a ValueError("Cannot generate complaint") is raised.
         """
         if self.verify_share(share_id, share_value, commitments):
-            raise ValueError("份额验证通过，不应生成投诉")
+            raise ValueError("Cannot generate complaint: 份额验证通过，不应生成投诉")
 
         expected_rhs = 1
         powers = [pow(share_id, j, self.q) for j in range(len(commitments))]
@@ -353,6 +353,5 @@ class FeldmanVSS(BasicShamir):
         """
         verification = self.batch_verification(shares, commitments)
         if not all(verification):
-            raise ValueError("存在无效份额，拒绝恢复秘密")
+            raise ValueError("Invalid share detected: 存在无效份额，拒绝恢复秘密")
         return self.recover_secret(shares)
-
