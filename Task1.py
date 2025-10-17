@@ -1,23 +1,51 @@
 import secrets
 from itertools import combinations
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from sympy import mod_inverse, nextprime
-from Crypto.Util import number
+
+try:
+    from Crypto.Util import number  # type: ignore
+except ImportError:
+    number = None  # 在无 PyCryptodome 环境下回退到本地生成
+
 
 class BasicSS:
-    def __init__(self, prime_bits: int = 256):
+    _PRIME_CACHE: Dict[int, int] = {}
+
+    def __init__(self, prime_bits: int = 256, prime: Optional[int] = None):
         """
         初始化安全秘密分享实例
 
         参数:
             prime_bits: 有限域素数的位数，默认256位
                         决定了可以处理的秘密大小和安全性
+            prime: 外部提供的素数（可选），方便在多组件间复用
         """
         if prime_bits < 32:
             raise ValueError("安全起见，prime_bits 必须至少为 32 位")
-        self.prime_bits = prime_bits
-        self.prime = number.getPrime(self.prime_bits)
+
+        if prime is not None:
+            if prime <= 0:
+                raise ValueError("prime 必须为正整数")
+            self.prime = prime
+            self.prime_bits = prime.bit_length()
+            BasicSS._PRIME_CACHE[self.prime_bits] = self.prime
+        else:
+            cached_prime = BasicSS._PRIME_CACHE.get(prime_bits)
+            if cached_prime is not None:
+                self.prime = cached_prime
+            else:
+                if number is not None:
+                    self.prime = number.getPrime(prime_bits)
+                else:
+                    candidate = secrets.randbits(prime_bits - 1)
+                    candidate |= 1 << (prime_bits - 1)
+                    candidate |= 1
+                    self.prime = nextprime(candidate)
+                BasicSS._PRIME_CACHE[prime_bits] = self.prime
+            self.prime_bits = prime_bits
+
         # block_size 是秘密的最大字节长度，预留2字节用于长度前缀
         # 例如，256位素数允许的最大秘密长度为 (256-16)/8 = 30 字节
         # 这样可以确保编码后的秘密不会超过有限域的范围
@@ -149,6 +177,11 @@ class BasicSS:
             if recovered != baseline:
                 return False
         return True
+
+    @classmethod
+    def get_cached_prime(cls, bits: int) -> Optional[int]:
+        """返回指定位数的缓存素数（如存在）。"""
+        return cls._PRIME_CACHE.get(bits)
 
 
 if __name__ == "__main__":
