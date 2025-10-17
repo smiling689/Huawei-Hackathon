@@ -52,6 +52,15 @@ def _apply_log_axis_style(axis: plt.Axes) -> None:
     axis.yaxis.set_major_formatter(ticker.FuncFormatter(_format_power_of_ten))
 
 
+def _apply_axis_text_style(axis: plt.Axes, font_size: float | None) -> None:
+    if font_size is None:
+        return
+    axis.title.set_fontsize(font_size)
+    axis.xaxis.label.set_fontsize(font_size)
+    axis.yaxis.label.set_fontsize(font_size)
+    axis.tick_params(axis="both", labelsize=font_size)
+
+
 _setup_matplotlib_fonts()
 
 
@@ -137,6 +146,7 @@ def run_benchmark(
     rounds: int = 100,
     sizes: List[int] | None = None,
     seed: int = 1337,
+    font_size: float | None = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     reference = FastBasicShamir(prime_bits=prime_bits)
     block_size = reference.block_size
@@ -206,13 +216,13 @@ def run_benchmark(
     basic_df["Size (KB)"] = basic_df["Secret Size (bytes)"].apply(to_kb)
     feldman_df["Size (KB)"] = feldman_df["Secret Size (bytes)"].apply(to_kb)
 
-    _plot_task1(basic_df)
-    _plot_task2(feldman_df)
+    _plot_task1(basic_df, font_size=font_size)
+    _plot_task2(feldman_df, font_size=font_size)
 
     return basic_df, feldman_df
 
 
-def _plot_task1(df: pd.DataFrame) -> None:
+def _plot_task1(df: pd.DataFrame, font_size: float | None = None) -> None:
     colors = {"Our": "#1f77b4", "Naive": "#ff7f0e"}
     styles = {
         "Share/Split (ms)": ("o", "-"),
@@ -254,14 +264,18 @@ def _plot_task1(df: pd.DataFrame) -> None:
     axes[1].set_ylabel("Time (ms)")
     axes[1].grid(True, linestyle="--", alpha=0.4)
 
-    axes[0].legend()
-    axes[1].legend()
+    for ax in axes:
+        _apply_axis_text_style(ax, font_size)
+
+    legend_kwargs = {"fontsize": font_size - 10} if font_size is not None else {}
+    axes[0].legend(**legend_kwargs)
+    axes[1].legend(**legend_kwargs)
     fig.tight_layout()
     fig.savefig("shamir.png", bbox_inches="tight")
     plt.close(fig)
 
 
-def _plot_task2(df: pd.DataFrame) -> None:
+def _plot_task2(df: pd.DataFrame, font_size: float | None = None) -> None:
     colors = {"Our": "#1f77b4", "Naive": "#ff7f0e"}
     styles = {
         "Share+Commit (ms)": ("o", "-"),
@@ -304,15 +318,19 @@ def _plot_task2(df: pd.DataFrame) -> None:
     axes[1].set_ylabel("Time (ms)")
     axes[1].grid(True, linestyle="--", alpha=0.4)
 
-    axes[0].legend()
-    axes[1].legend()
+    for ax in axes:
+        _apply_axis_text_style(ax, font_size)
+
+    legend_kwargs = {"fontsize": font_size - 14} if font_size is not None else {}
+    axes[0].legend(**legend_kwargs)
+    axes[1].legend(**legend_kwargs)
     fig.tight_layout()
     fig.savefig("feldman.png", bbox_inches="tight")
     plt.close(fig)
 
 
 if __name__ == "__main__":
-    bdf, fdf = run_benchmark()
+    bdf, fdf = run_benchmark(font_size=24)
     print("Task 1 — BasicShamir timings (ms):")
     print(bdf.to_string(index=False))
     print("\nTask 2 — Feldman VSS timings (ms):")
