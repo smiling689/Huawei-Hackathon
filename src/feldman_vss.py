@@ -10,12 +10,15 @@ verifiable sharing logic.
 """
 
 from typing import Dict, List, Tuple
-from .basic_shamir import BasicShamir
+
+# 兼容包内/脚本两种导入方式
+try:
+    from .basic_shamir import BasicShamir
+except Exception:  # pragma: no cover
+    from basic_shamir import BasicShamir
 
 import secrets
 import time
-from typing import Dict, List, Tuple
-
 from sympy import isprime, nextprime
 
 try:
@@ -34,10 +37,9 @@ class FeldmanVSS(BasicShamir):
     complaint handling so the sharing process is publicly verifiable.
     """
 
-    # def __init__(self, bits: int = 2048):
     def __init__(self, bits: int = 256):
         """
-        初始化 Feldman VSS 系统。
+                初始化 Feldman VSS 系统。
         Initialize the Feldman VSS system.
 
         参数:
@@ -63,13 +65,12 @@ class FeldmanVSS(BasicShamir):
             >>> vss = FeldmanVSS(bits=256)
         Example:
             >>> vss = FeldmanVSS(bits=256)
+        生成 (p, q, g) 并将 q 作为 BasicShamir 的有限域素数。
         """
         if bits < 32:
             raise ValueError("bits 参数过小，无法保证安全性")
 
         self.p, self.q, self.g = self._generate_safe_prime_parameters(bits)
-
-        # 以 q 作为有限域素数，复用 BasicSS 的运算能力。
         super().__init__(prime=self.q)
 
     @staticmethod
@@ -94,10 +95,11 @@ class FeldmanVSS(BasicShamir):
             else:
                 candidate_q = nextprime(candidate_q + 2)
 
+    # ------------------ 生成份额与承诺 ------------------
     def share_with_commitments(self, secret: bytes, n: int, t: int) -> Tuple[List[Tuple[int, int]], List[int]]:
         """
         生成可验证份额及公开承诺。
-        Generate verifiable shares and public commitments.
+                Generate verifiable shares and public commitments.
 
         参数:
             secret: 待分享的秘密字节串。
@@ -154,10 +156,10 @@ class FeldmanVSS(BasicShamir):
         commitments = [pow(self.g, coeff % self.q, self.p) for coeff in coeffs]
         return shares, commitments
 
+    # ------------------ 单份验证 ------------------
     def verify_share(self, share_id: int, share_value: int, commitments: List[int]) -> bool:
         """
-        验证单个份额是否与承诺匹配。
-        Verify whether a share matches the published commitments.
+                Verify whether a share matches the published commitments.
 
         参数:
             share_id: 份额编号。
@@ -184,6 +186,7 @@ class FeldmanVSS(BasicShamir):
             >>> FeldmanVSS().verify_share(1, 123, [1, 2, 3])
         Example:
             >>> FeldmanVSS().verify_share(1, 123, [1, 2, 3])
+        验证单个份额是否与承诺匹配。
         """
         lhs = pow(self.g, share_value, self.p)
 
@@ -194,53 +197,132 @@ class FeldmanVSS(BasicShamir):
 
         return lhs == rhs
 
+    # ------------------ 批处理验证（性能优化） ------------------
+    def aggregate_batch_verify(self, shares: List[Tuple[int, int]], commitments: List[int], *, seed: int | None = None) -> bool:
+        """
+        使用**随机线性组合**的一次性聚合验证来批量检查多份份额。
+
+        核心公式：
+            g^{sum r_i s_i} ?= ∏_j C_j^{ sum r_i i^j } (mod p)
+        将 O(len(shares)*t) 次模幂降为 O(t) 次，非常适合“批处理验证”。
+        """
+        if not shares:
+            return True
+
+        # 生成随机权重 r_i
+        if seed is not None:
+            # 简易可重复 PRNG：仅用于测试复现
+            a, c, m = 1103515245, 12345, 2**31
+            x = seed % m
+
+            def next_rand():
+                nonlocal x
+                x = (a * x + c) % m
+                return x
+
+            rand = lambda: 1 + (next_rand() % (self.q - 1))
+        else:
+            rand = lambda: 1 + secrets.randbelow(self.q - 1)
+
+        t = len(commitments)
+        E = [0] * t
+        sum_rs = 0
+        for share_id, share_value in shares:
+            r = rand()
+            sum_rs = (sum_rs + (r * (share_value % self.q))) % self.q
+
+            # 迭代式生成 i^j，避免重复 pow
+            pow_ij = 1
+            for j in range(t):
+                E[j] = (E[j] + r * pow_ij) % self.q
+                pow_ij = (pow_ij * (share_id % self.q)) % self.q
+
+        lhs = pow(self.g, sum_rs, self.p)
+
+        rhs = 1
+        for j, Cj in enumerate(commitments):
+            rhs = (rhs * pow(Cj, E[j], self.p)) % self.p
+
+        return lhs == rhs
+
     def batch_verification(self, shares: List[Tuple[int, int]], commitments: List[int]) -> List[bool]:
         """
-        批量验证多份份额。
-        Verify multiple shares in a batch.
-
-        参数:
-            shares: 待验证的份额列表。
-            commitments: 承诺值列表。
-        Args:
-            shares: List of shares to check.
-            commitments: List of commitments.
-
-        返回:
-            布尔值列表，对应每个份额的验证结果。
-        Returns:
-            List of booleans for each share's verification result.
-
-        实现要求:
-            - 通过幂次缓存等技巧减少重复计算；
-            - 对无法验证的份额返回 False。
-        Implementation Requirements:
-            - Use power caching or similar optimizations to reduce exponentiation.
-            - Return False for any share that fails verification.
-
-        示例:
-            >>> FeldmanVSS().batch_verification([(1, 123)], [1, 2])
-        Example:
-            >>> FeldmanVSS().batch_verification([(1, 123)], [1, 2])
+        批量验证多份份额（优化版：幂次迭代生成+Cj的2的幂次预处理+逐份精确验证）。
+        核心：用二进制分解优化模幂运算，无线性组合，每个份额独立验证。
         """
         results = []
+        if not shares or not commitments:
+            return [False] * len(shares)
+        
+        # 1. 提取公共参数（避免重复访问属性）
+        g = self.g
+        p = self.p  # 大素数（Cj 和 g 的模）
+        q = self.q  # 有限域素数（i^j 和 s_i 的模）
+        t = len(commitments)  # 承诺值数量 = 多项式系数个数（0~t-1次）
+        max_exponent_bits = q.bit_length()  # i^j < q，二进制位数不超过 q 的位数（最大3072位，按安全参数）
+
+        # 2. 预处理：对每个 Cj，预计算 Cj^(2^0), Cj^(2^1), ..., Cj^(2^max_exponent_bits) mod p
+        # 目的：后续计算 Cj^e 时，通过二进制分解 e 复用预处理结果，减少模幂次数
+        cj_pow2_cache = []
+        for cj in commitments:
+            # 检查 Cj 合法性（避免平凡值，确保是有效承诺）
+            if cj <= 1 or cj >= p - 1:
+                return [False] * len(shares)  # 无效承诺值，所有份额均无效
+            
+            # 预计算 Cj 的 2^k 次幂（k从0到max_exponent_bits）
+            pow2_list = [1] * (max_exponent_bits + 1)
+            pow2_list[0] = cj  # Cj^(2^0) = Cj^1 = Cj
+            for k in range(1, max_exponent_bits + 1):
+                # 递推：Cj^(2^k) = (Cj^(2^(k-1)))^2 mod p
+                pow2_list[k] = pow(pow2_list[k-1], 2, p)
+            cj_pow2_cache.append(pow2_list)
+
+        # 3. 逐份验证（幂次迭代+预处理幂次复用）
         for share_id, share_value in shares:
-            powers = [1]
-            for j in range(1, len(commitments)):
-                powers.append((powers[-1] * share_id) % self.q)
+            # 3.1 基础合法性检查（提前过滤无效份额）
+            if (share_id <= 0 or share_id >= p) or (share_value < 0 or share_value >= q):
+                results.append(False)
+                continue
 
+            # 3.2 迭代生成 share_id 的 0~t-1 次幂（i^0, i^1, ..., i^(t-1)）mod q
+            i_powers = [1] * t  # i^0 = 1（任何数的0次幂为1）
+            for j in range(1, t):
+                # 递推：i^j = i^(j-1) * i mod q（避免重复 pow 计算）
+                i_powers[j] = (i_powers[j-1] * share_id) % q
+
+            # 3.3 计算验证等式右侧：∏(Cj^i^j) mod p（复用 Cj 的 2的幂次预处理结果）
             rhs = 1
-            for power, commitment in zip(powers, commitments):
-                rhs = (rhs * pow(commitment, power, self.p)) % self.p
+            for j in range(t):
+                e = i_powers[j]  # 当前指数：e = i^j
+                cj_pow2 = cj_pow2_cache[j]  # 当前 Cj 的 2的幂次列表
 
-            lhs = pow(self.g, share_value, self.p)
+                # 二进制分解 e：e = b0*2^0 + b1*2^1 + ... + bk*2^k（bi ∈ {0,1}）
+                # Cj^e = Cj^(b0*2^0) * Cj^(b1*2^1) * ... * Cj^(bk*2^k) = ∏(cj_pow2[k] if bk=1 else 1)
+                term = 1
+                temp_e = e
+                bit_idx = 0
+                while temp_e > 0:
+                    if temp_e & 1:  # 若当前位为1，乘上对应的 Cj^(2^bit_idx)
+                        term = (term * cj_pow2[bit_idx]) % p
+                    temp_e >>= 1  # 右移一位，处理下一个二进制位
+                    bit_idx += 1
+
+                # 累积当前 Cj^e 到右侧结果
+                rhs = (rhs * term) % p
+
+            # 3.4 计算验证等式左侧：g^share_value mod p（直接模幂，g 固定无需预处理）
+            lhs = pow(g, share_value, p)
+
+            # 3.5 验证等式：左侧 == 右侧？
             results.append(lhs == rhs)
+
         return results
 
+    # ------------------ 投诉与恢复 ------------------
     def generate_complaint(self, share_id: int, share_value: int, commitments: List[int]) -> Dict:
         """
         针对无效份额生成投诉信息。
-        Create a complaint record for an invalid share.
+                Create a complaint record for an invalid share.
 
         参数:
             share_id: 举报的份额编号。
@@ -325,6 +407,7 @@ class FeldmanVSS(BasicShamir):
 
     def recover_secret_from_shares(self, shares: List[Tuple[int, int]], commitments: List[int]) -> bytes:
         """
+
         在验证后从份额恢复秘密。
         Recover the secret from shares after verification.
 
@@ -358,6 +441,7 @@ class FeldmanVSS(BasicShamir):
             >>> FeldmanVSS().recover_secret_from_shares([(1, 10), (2, 20)], [1, 2, 3])
         Example:
             >>> FeldmanVSS().recover_secret_from_shares([(1, 10), (2, 20)], [1, 2, 3])
+        在验证后从份额恢复秘密（全部份额必须为真）。
         """
         verification = self.batch_verification(shares, commitments)
         if not all(verification):

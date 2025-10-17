@@ -313,3 +313,53 @@ class BasicShamir:
     def get_cached_prime(cls, bits: int) -> Optional[int]:
         """返回指定位数的缓存素数（如存在）。"""
         return cls._PRIME_CACHE.get(bits)
+
+### test 32KB
+if __name__ == "__main__":
+    # 1. 你的32KB大密钥
+    large_secret = get_random_bytes(32 * 1024) 
+
+    # 2. 生成一个临时的、小的对称密钥 (AES 256)
+    symmetric_key = get_random_bytes(32) # 32 bytes = 256 bits
+
+    # 3. 使用对称密钥加密你的大数据
+    cipher_aes = AES.new(symmetric_key, AES.MODE_CBC)
+    # iv (初始化向量) 需要和密文一起存储
+    iv = cipher_aes.iv 
+    encrypted_large_secret = cipher_aes.encrypt(pad(large_secret, AES.block_size))
+
+    # 4. 使用 SSS 分割那个小的对称密钥
+    # 使用默认的 prime_bits=256 就足够了
+    sss = BasicShamir(prime_bits=272) 
+    n = 5
+    t = 3
+    key_shares = sss.split_secret(symmetric_key, n, t)
+
+    # 5. 现在你需要保存/分发:
+    #   - key_shares (分发给不同参与者)
+    #   - encrypted_large_secret (存储在公共位置)
+    #   - iv (和密文一起存储)
+
+    print("✅ 分割完成！")
+    print(f"对称密钥份额 (示例第一个): {key_shares[0]}")
+    print(f"加密后的大数据长度: {len(encrypted_large_secret)}")
+
+    # --- 恢复流程 ---
+
+    # 1. 收集足够数量的密钥份额
+    shares_for_recovery = [key_shares[0], key_shares[2], key_shares[4]]
+
+    # 2. 使用 SSS 恢复小的对称密钥
+    recovered_symmetric_key = sss.recover_secret(shares_for_recovery)
+
+    # 验证密钥恢复是否正确
+    assert symmetric_key == recovered_symmetric_key
+
+    # 3. 使用恢复的对称密钥解密大数据
+    decipher_aes = AES.new(recovered_symmetric_key, AES.MODE_CBC, iv=iv)
+    decrypted_large_secret = unpad(decipher_aes.decrypt(encrypted_large_secret), AES.block_size)
+
+    # 验证整个流程是否成功
+    assert large_secret == decrypted_large_secret
+
+    print("\n✅ 恢复成功！原始数据已找回。")
