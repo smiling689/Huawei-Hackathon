@@ -89,7 +89,6 @@ class FeldmanVSS(BasicSS):
     ) -> List[bool]:
         """
         批量验证多个份额，复用 share_id 的幂次以减少重复计算。
-        Note: 自己实现快速幂，预处理g^(2^i)
         """
         results = []
         for share_id, share_value in shares:
