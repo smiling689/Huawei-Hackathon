@@ -12,7 +12,7 @@ import time
 from typing import Dict, List, Tuple
 import secrets
 
-from src.basic_shamir import BasicShamir
+# from src.basic_shamir import BasicShamir
 
 
 class ProactiveSecretSharing:

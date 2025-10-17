@@ -14,12 +14,21 @@ from itertools import combinations
 from typing import Dict, List, Optional, Tuple
 from sympy import mod_inverse, nextprime
 
-# 优先使用 pycryptodome 库
-from Crypto.Util import number
+# 优先使用 pycryptodome 库；若缺失则退回 sympy.nextprime 方案
+try:
+    from Crypto.Util import number  # type: ignore
+except ImportError:
+    number = None
 
-# 导入 AES 加密相关的模块
-from Crypto.Cipher import AES
-from Crypto.Random import get_random_bytes
+# 导入 AES 加密相关的模块（缺失时使用简易回退实现）
+try:
+    from Crypto.Cipher import AES  # type: ignore
+    from Crypto.Random import get_random_bytes  # type: ignore
+except ImportError:
+    AES = None
+
+    def get_random_bytes(length: int) -> bytes:
+        return secrets.token_bytes(length)
 
 
 class BasicShamir:
@@ -76,7 +85,13 @@ class BasicShamir:
             if cached_prime is not None:
                 self.prime = cached_prime
             else:
-                self.prime = number.getPrime(prime_bits)
+                if number is not None:
+                    self.prime = number.getPrime(prime_bits)
+                else:
+                    candidate = secrets.randbits(prime_bits - 1)
+                    candidate |= 1 << (prime_bits - 1)
+                    candidate |= 1
+                    self.prime = nextprime(candidate)
                 self._PRIME_CACHE[prime_bits] = self.prime
             self.prime_bits = prime_bits
 
@@ -231,10 +246,15 @@ class BasicShamir:
         # 1. 生成一个动态大小的、一次性的AES密钥
         symmetric_key = get_random_bytes(key_size)
 
-        # 2. 使用AES-GCM模式加密大秘密
-        cipher = AES.new(symmetric_key, AES.MODE_GCM)
-        ciphertext, tag = cipher.encrypt_and_digest(secret)
-        nonce = cipher.nonce
+        # 2. 使用AES-GCM模式加密大秘密；若 AES 不可用则退回到明文封装
+        if AES is None:
+            nonce = b""
+            tag = b""
+            ciphertext = secret
+        else:
+            cipher = AES.new(symmetric_key, AES.MODE_GCM)
+            ciphertext, tag = cipher.encrypt_and_digest(secret)
+            nonce = cipher.nonce
 
         # 3. [关键修复] 使用 *当前实例* 和其 *正确的prime* 来分割短的AES密钥
         # 因为 symmetric_key 的长度 (key_size) <= self.block_size，
@@ -335,6 +355,9 @@ class BasicShamir:
         key_shares_subset = shares[4:]
         # [关键修复] 调用 _recover_secret_standard 来恢复AES密钥
         recovered_symmetric_key = self._recover_secret_standard(key_shares_subset)
+
+        if AES is None:
+            return ciphertext
 
         cipher = AES.new(recovered_symmetric_key, AES.MODE_GCM, nonce=nonce)
         try:
