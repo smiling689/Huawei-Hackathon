@@ -11,11 +11,10 @@ import math
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from src.hierarchical_sharing import HierarchicalSecretSharing
-from Crypto.Random import get_random_bytes
+
 
 def test_master_key_recovery():
-    # secret = b"MASTER_KEY_2024"
-    secret = get_random_bytes(32 * 1024)
+    secret = b"MASTER_KEY_2024"
     hss = HierarchicalSecretSharing(vss_bits=256)
     master_shares = hss.create_master_key(secret)
 
@@ -31,8 +30,7 @@ def test_master_key_recovery():
 
 
 def test_regional_key_recovery():
-    # secret = b"REGIONAL_KEY"
-    secret = get_random_bytes(32 * 1024)
+    secret = b"REGIONAL_KEY"
     region = "asia"
     hss = HierarchicalSecretSharing(vss_bits=256)
     regional = hss.create_regional_key(secret, region)
@@ -46,8 +44,7 @@ def test_regional_key_recovery():
 
 
 def test_branch_key_recovery():
-    # secret = b"BRANCH_KEY"
-    secret = get_random_bytes(32 * 1024)
+    secret = b"BRANCH_KEY"
     branches = ["branch_001", "branch_002", "branch_003", "branch_004"]
 
     hss = HierarchicalSecretSharing(vss_bits=256)
@@ -68,8 +65,7 @@ def test_verify_share_interface():
 
 
 def test_refresh_shares_interface():
-    # secret = b"REFRESH_MASTER"
-    secret = get_random_bytes(32 * 1024)
+    secret = b"REFRESH_MASTER"
     hss = HierarchicalSecretSharing(vss_bits=256)
     master = hss.create_master_key(secret)
 
