@@ -7,10 +7,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-from src.basic_shamir import BasicShamir
-from src.feldman_vss import FeldmanVSS
-from src.hierarchical_sharing import HierarchicalSecretSharing, Share
-from src.proactive_sharing import ProactiveSecretSharing
+from basic_shamir import BasicShamir
+from feldman_vss import FeldmanVSS
+from hierarchical_sharing import HierarchicalSecretSharing, Share
+from proactive_sharing import ProactiveSecretSharing
 
 
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
