@@ -48,7 +48,7 @@ python src/app.py
 
 本方案设计了"标准模式+混合加密模式"双架构，实现对不同规模秘密的全覆盖支持。
 
-对于长度$\leq$ `block_size`的小秘密（如16字节AES密钥），通过
+对于长度 $\leq$ `block_size`的小秘密（如16字节AES密钥），通过
 `_split_secret_standard`
 直接执行经典Shamir拆分，无需额外加密步骤，保持高效计算；对于长度 $\geq$
 1024bit的大秘密，则通过 `_split_secret_hybrid`
