@@ -4,3 +4,16 @@ __pycache__/
 *.pyd
 .Python
 *.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+
+# Benchmark outputs written to the working directory
+/shamir.png
+/feldman.png
